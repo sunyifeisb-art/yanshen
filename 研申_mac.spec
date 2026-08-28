@@ -112,8 +112,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "研申",
         "CFBundleDisplayName": "研申",
-        "CFBundleShortVersionString": "1.4.4",
-        "CFBundleVersion": "1.4.4.0",
+        "CFBundleShortVersionString": "1.4.9",
+        "CFBundleVersion": "1.4.9.0",
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "12.0",
         "NSHumanReadableCopyright": "仅供个人学习与研究使用。MIT License (program code)",

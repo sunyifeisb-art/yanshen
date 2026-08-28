@@ -240,7 +240,7 @@ CREATE TABLE IF NOT EXISTS ai_settings (
     api_base_url TEXT NOT NULL DEFAULT 'https://api.deepseek.com',
     api_key TEXT NOT NULL DEFAULT '',
     api_key_env TEXT NOT NULL DEFAULT 'DEEPSEEK_API_KEY',
-    model TEXT NOT NULL DEFAULT 'deepseek-v4-pro',
+    model TEXT NOT NULL DEFAULT 'deepseek-v4-flash',
     temperature REAL NOT NULL DEFAULT 0.2,
     prompt_template TEXT NOT NULL DEFAULT '',
     grading_mode TEXT NOT NULL DEFAULT 'basic',
@@ -1134,7 +1134,7 @@ def seed_ai_settings(conn):
         """
         INSERT OR IGNORE INTO ai_settings (
             id, mode, provider_name, api_base_url, api_key_env, model, temperature
-        ) VALUES (1, 'api', 'DeepSeek', 'https://api.deepseek.com', 'DEEPSEEK_API_KEY', 'deepseek-v4-pro', 0.2)
+        ) VALUES (1, 'api', 'DeepSeek', 'https://api.deepseek.com', 'DEEPSEEK_API_KEY', 'deepseek-v4-flash', 0.2)
         """
     )
 

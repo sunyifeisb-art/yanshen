@@ -441,8 +441,8 @@ class GradingController:
         </section>"""
         more_html = f"""
           <a href="/attempts">全部作答记录</a>
-          <a href="/attempts/{attempt_id}/package.md">下载批改包 (MD)</a>
-          <a href="/attempts/{attempt_id}/package.zip">导出批改包 (ZIP)</a>
+          <a href="/attempts/{attempt_id}/package.md" data-package-download>下载批改包 (MD)</a>
+          <a href="/attempts/{attempt_id}/package.zip" data-package-download>导出批改包 (ZIP)</a>
           <form method="post" action="/attempts/{attempt_id}/delete" data-confirm="确认删除这次作答和对应批改报告吗？"><button class="menu-danger" type="submit">删除本次作答</button></form>
         """
         body = f"""

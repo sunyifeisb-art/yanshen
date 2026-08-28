@@ -165,7 +165,7 @@ def build_release_db(source, output):
             UPDATE ai_settings
                SET mode = 'api', provider_name = 'DeepSeek',
                    api_base_url = 'https://api.deepseek.com', api_key = '',
-                   api_key_env = 'DEEPSEEK_API_KEY', model = 'deepseek-v4-pro',
+                   api_key_env = 'DEEPSEEK_API_KEY', model = 'deepseek-v4-flash',
                    temperature = 0.2, prompt_template = '', grading_mode = 'basic'
              WHERE id = 1
             """

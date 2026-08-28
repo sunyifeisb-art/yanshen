@@ -297,14 +297,54 @@ def _rerank_evidence_with_llm(llm, user_goal, rag_context, limit=20):
 
 def _graph_for(settings, db_path, stack=None):
     ChatOpenAI, StateGraph, START, END = _load_langgraph()
-    llm = ChatOpenAI(
-        model=settings["model"],
-        api_key=resolve_api_key(settings),
-        base_url=_normalize_base_url(settings["api_base_url"]),
-        temperature=float(settings["temperature"] or 0.2),
-        timeout=180,
-        max_retries=0,
-    )
+
+    if (settings or {}).get("mode") == "chatgpt":
+        # ChatGPT/Codex 账号模式：chatgpt.com 不提供 OpenAI 兼容接口（直接 POST 会
+        # 返回 403 HTML 页），因此与批改保持一致，改用本地 Codex CLI 复用 ChatGPT OAuth。
+        from langchain_core.language_models.chat_models import BaseChatModel
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        def _messages_to_prompt(messages):
+            parts = []
+            for message in messages:
+                if isinstance(message, SystemMessage):
+                    parts.append(f"<system>\n{message.content}\n</system>")
+                elif isinstance(message, HumanMessage):
+                    parts.append(f"<user>\n{message.content}\n</user>")
+                elif isinstance(message, AIMessage):
+                    parts.append(f"<assistant>\n{message.content}\n</assistant>")
+                else:
+                    parts.append(f"<message>\n{message.content}\n</message>")
+            return "\n\n".join(parts)
+
+        class _CodexChatModel(BaseChatModel):
+            settings: dict
+
+            @property
+            def _llm_type(self):
+                return "codex-account"
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                from .ai import codex_chat_completion
+                prompt = _messages_to_prompt(messages)
+                content, _ = codex_chat_completion(
+                    self.settings, prompt, kwargs.get("request_options")
+                )
+                return ChatResult(
+                    generations=[ChatGeneration(message=AIMessage(content=content))]
+                )
+
+        llm = _CodexChatModel(settings=dict(settings))
+    else:
+        llm = ChatOpenAI(
+            model=settings["model"],
+            api_key=resolve_api_key(settings),
+            base_url=_normalize_base_url(settings["api_base_url"]),
+            temperature=float(settings["temperature"] or 0.2),
+            timeout=180,
+            max_retries=0,
+        )
 
     def classify_node(state: AgentState):
         user_goal = state.get("user_goal", "")

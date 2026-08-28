@@ -18,9 +18,12 @@ back to CSS zoom, so this bridge is purely additive.
 """
 
 import logging
+import re
 import threading
 import time
 import urllib.request
+from pathlib import Path
+from urllib.parse import unquote
 
 import webview
 
@@ -117,6 +120,50 @@ class HostBridge:
                 logging.info("Display profile changed to window")
         except Exception:
             logging.exception("Desktop host command failed: %s", command)
+
+    def download_file(self, url):
+        """Fetch a local server URL (e.g. /attempts/1/package.zip) and save it to
+        ~/Downloads. WKWebView does not trigger downloads from anchor links, so
+        the JS layer forwards the click here and we save the file natively."""
+        try:
+            url = str(url or "").strip()
+            if not url.startswith("/"):
+                url = "/" + url
+            with urllib.request.urlopen(f"http://127.0.0.1:{self._local_server_port()}{url}", timeout=120) as response:
+                data = response.read()
+                disposition = response.headers.get("Content-Disposition") or ""
+            filename = self._filename_from_disposition(disposition) or "研申批改包.zip"
+            stem, dot, ext = filename.rpartition(".")
+            filename = f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}{dot if dot else '.zip'}{ext if dot else ''}"
+            downloads = Path.home() / "Downloads"
+            try:
+                downloads.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                downloads = Path.home()
+            target = downloads / filename
+            target.write_bytes(data)
+            return {"ok": True, "path": str(target)}
+        except Exception as exc:
+            logging.exception("Host download failed for %s", url)
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _filename_from_disposition(disposition):
+        match = re.search(r"filename\*=UTF-8''([^;]+)", disposition, re.IGNORECASE)
+        if match:
+            return unquote(match.group(1))
+        match = re.search(r'filename="?([^";]+)"?', disposition, re.IGNORECASE)
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _local_server_port():
+        try:
+            port = int((user_data_dir() / SERVER_PORT_FILE).read_text(encoding="utf-8").strip())
+            if 1024 <= port <= 65535:
+                return port
+        except Exception:
+            pass
+        return 5000
 
 
 class Launcher:

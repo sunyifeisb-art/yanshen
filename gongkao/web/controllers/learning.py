@@ -152,7 +152,7 @@ class LearningController:
             "region": query.get("region", [""])[0],
             "question_type": query.get("question_type", [""])[0],
             "paper_id": query.get("paper_id", [""])[0],
-            "year_from": query.get("year_from", ["2020"])[0],
+            "year_from": query.get("year_from", ["2015"])[0],
             "year_to": query.get("year_to", [""])[0],
             "status": query.get("status", [""])[0],
             "q": query.get("q", [""])[0],
@@ -253,7 +253,7 @@ class LearningController:
         pager = pagination_html("/attempts", filters, page, total_items, page_size)
         has_active_filters = any(
             filters[name] for name in ("exam_type", "region", "question_type", "paper_id", "year_to", "status", "q")
-        ) or (filters["year_from"] and filters["year_from"] != "2020")
+        ) or (filters["year_from"] and filters["year_from"] != "2015")
 
         rows = []
         for attempt in attempts:

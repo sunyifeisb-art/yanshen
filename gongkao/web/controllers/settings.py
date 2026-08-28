@@ -249,7 +249,7 @@ class SettingsController:
             <div class="settings-fields">
               <label><span>服务商名称</span><input name="provider_name" value="{esc(settings["provider_name"])}" placeholder="DeepSeek"></label>
               <label><span>Base URL</span><input name="api_base_url" value="{esc(settings["api_base_url"])}" placeholder="https://api.deepseek.com"></label>
-              <label><span>模型名</span><input name="model" value="{esc(settings["model"])}" placeholder="deepseek-v4-pro"></label>
+              <label><span>模型名</span><input name="model" value="{esc(settings["model"])}" placeholder="deepseek-v4-flash"></label>
               <label><span>Temperature</span><input name="temperature" value="{esc(settings["temperature"])}" inputmode="decimal"></label>
               <label><span>API Key 环境变量</span><input name="api_key_env" value="{esc(settings["api_key_env"])}" placeholder="DEEPSEEK_API_KEY"></label>
               <label><span>API Key</span><input name="api_key" value="" autocomplete="off" placeholder="{esc(key_status)}"></label>
@@ -415,7 +415,7 @@ class SettingsController:
             else:
                 provider_name = form.get("provider_name", ["DeepSeek"])[0].strip() or "DeepSeek"
                 api_base_url = form.get("api_base_url", ["https://api.deepseek.com"])[0].strip() or "https://api.deepseek.com"
-                model = form.get("model", ["deepseek-v4-pro"])[0].strip() or "deepseek-v4-pro"
+                model = form.get("model", ["deepseek-v4-flash"])[0].strip() or "deepseek-v4-flash"
             conn.execute(
                 """
                 UPDATE ai_settings

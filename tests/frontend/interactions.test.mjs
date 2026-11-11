@@ -32,6 +32,17 @@ function installDom(html, url = "http://localhost/attempts/7") {
   return dom;
 }
 
+// 事件处理走 setTimeout(0)，固定 sleep 在负载高的 runner 上会抖；
+// 改成轮询直到条件成立，超时才失败。
+async function waitUntil(predicate, message, timeout = 2000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    if (predicate()) return;
+    await new Promise((resolve) => window.setTimeout(resolve, 10));
+  }
+  assert.ok(predicate(), message);
+}
+
 test("alignment applies only to the caret line or selected paragraphs", async () => {
   const dom = installDom(`
     <div class="answer-editor-toolbar" data-editor-toolbar data-editor-target="#answer">
@@ -215,7 +226,8 @@ test("material selectionchange opens the annotation toolbar and can apply a high
   selection.removeAllRanges();
   selection.addRange(range);
   document.dispatchEvent(new Event("selectionchange"));
-  await new Promise((resolve) => window.setTimeout(resolve, 5));
+  document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  await waitUntil(() => toolbar.hidden === false, "annotation toolbar did not appear for the material selection");
 
   assert.equal(toolbar.hidden, false);
   assert.equal(toolbar.dataset.placement, "right");
@@ -513,7 +525,8 @@ test("highlighting paragraphs across a blank line keeps exactly one blank paragr
   selection.removeAllRanges();
   selection.addRange(range);
   document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-  await new Promise((resolve) => window.setTimeout(resolve, 5));
+  const highlightToolbar = document.querySelector("[data-highlight-toolbar]");
+  await waitUntil(() => highlightToolbar && highlightToolbar.hidden === false, "annotation toolbar did not appear for the paragraph selection");
   document.querySelector('[data-highlight-color="yellow"]').click();
 
   const renderedLines = editor.querySelectorAll(":scope > [data-editor-line]");

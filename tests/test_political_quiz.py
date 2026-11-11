@@ -3,6 +3,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
@@ -30,6 +31,17 @@ from gongkao.political_quiz import (
     validate_quiz_pack,
     validate_quiz_quality,
 )
+
+
+@contextmanager
+def open_database(path):
+    """提交并关闭连接：Windows 上未关闭的句柄会让临时目录清理报 WinError 32。"""
+    conn = sqlite3.connect(path)
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def sample_pack():
@@ -676,7 +688,7 @@ class PoliticalQuizPersistenceTests(unittest.TestCase):
         migrated = Path(self.tmp.name) / "existing.sqlite3"
         shutil.copy2(seed, migrated)
         init_db(migrated)
-        with sqlite3.connect(migrated) as conn:
+        with open_database(migrated) as conn:
             tables = {
                 row[0]
                 for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -685,7 +697,7 @@ class PoliticalQuizPersistenceTests(unittest.TestCase):
         self.assertIn("political_quiz_attempts", tables)
 
     def test_pack_and_attempt_round_trip(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with open_database(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             pack_id = save_quiz_pack(conn, sample_pack(), verification_status="verified")
             packs = list_quiz_packs(conn)
@@ -717,7 +729,7 @@ class PoliticalQuizPersistenceTests(unittest.TestCase):
             "period_end": "2026-09",
             "question_count": 20,
         }
-        with sqlite3.connect(self.db_path) as conn:
+        with open_database(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             save_quiz_pack(conn, sample_pack(), verification_status="verified")
             record_quiz_generation_failure(
@@ -741,7 +753,7 @@ class PoliticalQuizPersistenceTests(unittest.TestCase):
             "period_end": "2026-09",
             "question_count": 20,
         }
-        with sqlite3.connect(self.db_path) as conn:
+        with open_database(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             for message in ("第一次失败", "第二次失败"):
                 record_quiz_generation_failure(conn, error=message, options=options)

@@ -11,7 +11,7 @@ from gongkao.db import init_db
 from gongkao.organizations import canonicalize_organization
 from gongkao.taxonomy import QUESTION_TYPES, classify_question_type
 
-EXPECTED = {"papers": 455, "questions": 1750, "reference_answers": 9410}
+MINIMUM = {"papers": 1600, "questions": 5800, "reference_answers": 13500}
 ALLOWED_QUESTION_TYPES = set(QUESTION_TYPES)
 
 
@@ -163,9 +163,10 @@ def build_release_db(source, output):
         conn.execute(
             """
             UPDATE ai_settings
-               SET mode = 'api', provider_name = 'DeepSeek',
-                   api_base_url = 'https://api.deepseek.com', api_key = '',
-                   api_key_env = 'DEEPSEEK_API_KEY', model = 'deepseek-v4-pro',
+               SET mode = 'workbuddy', provider_name = 'WorkBuddy',
+                   api_base_url = 'https://copilot.tencent.com',
+                   api_key = '', api_key_env = '',
+                   model = 'deepseek-v4.1-flash', workbuddy_account = '',
                    temperature = 0.2, prompt_template = '', grading_mode = 'basic'
              WHERE id = 1
             """
@@ -191,14 +192,14 @@ def build_release_db(source, output):
         )
         conn.execute("DELETE FROM release_metadata")
         conn.execute(
-            "INSERT INTO release_metadata (key, value) VALUES ('content_version', '1.3.6')"
+            "INSERT INTO release_metadata (key, value) VALUES ('content_version', '1.5.0')"
         )
         conn.commit()
 
-        for table, expected in EXPECTED.items():
+        for table, minimum in MINIMUM.items():
             actual = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            if actual != expected:
-                raise RuntimeError(f"{table}: expected {expected}, got {actual}")
+            if actual < minimum:
+                raise RuntimeError(f"{table}: expected at least {minimum}, got {actual}")
         if conn.execute("SELECT COUNT(*) FROM questions q WHERE NOT EXISTS (SELECT 1 FROM reference_answers r WHERE r.question_id = q.id)").fetchone()[0]:
             raise RuntimeError("release database contains questions without answers")
         if conn.execute("SELECT COUNT(*) FROM reference_answers WHERE TRIM(COALESCE(answer_text, '')) IN ('', '暂无答案数据') OR TRIM(COALESCE(organization, '')) IN ('', '??????')").fetchone()[0]:

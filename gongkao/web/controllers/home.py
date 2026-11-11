@@ -241,7 +241,7 @@ class HomeController:
         word_limit = max(word_limit_numbers, default=0)
         hero_progress = min(100, round(hero_word_count * 100 / word_limit)) if word_limit else 0
         hero_title = home_question_title(hero) if hero else "从题库挑选一套试卷，开始第一次练习"
-        hero_context = f"{hero['year']} {hero['region']} · {hero['exam_type']}" if hero else "研申 · 本地训练"
+        hero_context = f"{hero['year']} {hero['region']} · {hero['exam_type']}" if hero else "本地训练"
         hero_meta = []
         if hero:
             hero_meta.append(hero["question_type"] or "未分类")
@@ -409,7 +409,7 @@ class HomeController:
               <div class="home-recent-list">{"".join(recent_rows)}</div>
             </article>
             <article class="home-insight-card">
-              <div class="home-card-heading"><div><p class="eyebrow">WEEKLY INSIGHT</p><h2>能力观察</h2></div><span class="home-ai-tag">✦ AI 教练</span></div>
+              <div class="home-card-heading"><div><p class="eyebrow">本周训练</p><h2>本周表现</h2></div><span class="home-ai-tag">训练分析</span></div>
               <p class="home-insight-mode">{esc(insight_label)} · 首次作答口径</p>
               <div class="home-skill-bars">{"".join(score_rows)}</div>
               <a class="home-insight-action" href="{esc(weak_href)}">开始专项训练</a>

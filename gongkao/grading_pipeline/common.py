@@ -86,7 +86,7 @@ ANSWER_GRID_RULES = """考试答题纸占格规则：
 - 连续英文、半角数字每2个字符占1格，奇数个向上取整。
 - 标准破折号“——”、省略号“……”整体占2格；单独“—”或“…”也占2格。
 - 空格占1格。
-- 手动换行会立即结算当前行，未用完的格子也会占用版面，下一段从新行开始；纯空白行不计行数。
+- 手动换行会立即结算当前行，未用完的格子也计入字数限制；中间的纯空白行占满25格。
 - 不自动增加段首两格，只有实际输入的空格才计格。"""
 
 
@@ -97,9 +97,9 @@ def _word_budget_guidance(budget):
     minimum = int(budget.get("minimum") or 0)
     parts = []
     if suggested_min and suggested_max:
-        parts.append(f"修改版答案目标为 {suggested_min}—{suggested_max} 格")
+        parts.append(f"修改版答案目标为 {suggested_min}—{suggested_max} 字")
     if hard_max:
-        parts.append(f"最终结果必须严格低于 {hard_max} 格，等于 {hard_max} 也超限")
+        parts.append(f"最终结果不得超过 {hard_max - 1} 字，等于上限合格")
     elif minimum:
         parts.append(f"题目要求不少于 {minimum} 格")
     if not parts:

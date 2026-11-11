@@ -38,6 +38,12 @@ jobs:
         run: npm ci
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      - name: Build sanitized release database
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build | Out-Null
+          python scripts/build_release_db.py --source data/gongkao_seed.sqlite3 --output build/release_seed.sqlite3
+          Copy-Item build/release_seed.sqlite3 data/gongkao_seed.sqlite3 -Force
       - name: Run static checks
         shell: pwsh
         run: ./scripts/check.ps1 -SkipPythonTests
@@ -58,6 +64,12 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies and build tools
         run: pip install -r requirements.txt -r requirements-build.txt
+      - name: Build sanitized release database
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build | Out-Null
+          python scripts/build_release_db.py --source data/gongkao_seed.sqlite3 --output build/release_seed.sqlite3
+          Copy-Item build/release_seed.sqlite3 data/gongkao_seed.sqlite3 -Force
       - name: Build native WebView2 host
         shell: pwsh
         run: ./scripts/build_desktop_host.ps1

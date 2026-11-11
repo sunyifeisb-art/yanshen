@@ -36,7 +36,7 @@ def _title_for(text, entrypoint):
         "today": "今日训练建议",
         "recent_review": "复盘最近一次作答",
         "next_question": "推荐下一题",
-    }.get(entrypoint, "AI 教练对话")
+    }.get(entrypoint, "训练分析对话")
 
 
 def _prepare_chat_request(
@@ -310,7 +310,7 @@ def _complete_chat_in_background(db_path, prepared, pending_message_id, auto_app
                     run_status = (run["status"] if run else "") or ""
                     message_type = "error" if run_status == "failed" else "suggestion"
                     final_content = (run["final_text"] if run else "") or (
-                        "AI 教练生成失败，请到模型设置检查 API 配置。" if run_status == "failed" else "AI 教练分析完成。"
+                        "分析失败，请到模型设置检查连接配置。" if run_status == "failed" else "分析完成。"
                     )
                     update_message(
                         conn,
@@ -334,7 +334,7 @@ def _complete_chat_in_background(db_path, prepared, pending_message_id, auto_app
                     update_message(
                         conn,
                         pending_message_id,
-                        f"AI 教练运行失败：{exc}",
+                        f"训练分析失败：{exc}",
                         message_type="error",
                         metadata=_assistant_metadata(prepared),
                     )
@@ -431,7 +431,7 @@ def _cleanup_orphaned_pending_messages(conn, conversation_id=None, max_age_secon
             update_message(
                 conn,
                 row["id"],
-                run["final_text"] or "AI 教练生成失败，请重试。",
+                run["final_text"] or "分析失败，请重试。",
                 run_id=run_id,
                 message_type="error",
             )
@@ -448,11 +448,11 @@ def _cleanup_orphaned_pending_messages(conn, conversation_id=None, max_age_secon
             created_ts = dt.timestamp()
             if (now_ts - created_ts) > max_age_seconds:
                 if run_id:
-                    fail_run(conn, run_id, "AI 教练生成超时")
+                    fail_run(conn, run_id, "训练分析超时")
                 update_message(
                     conn,
                     row["id"],
-                    "AI 教练生成超时。请到模型设置检查 API Key 或重新发送询问。",
+                    "训练分析超时。请到模型设置检查连接配置或重新发送询问。",
                     message_type="error",
                 )
         except Exception as exc:

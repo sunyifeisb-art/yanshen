@@ -1,5 +1,15 @@
 """Settings, import, export, and local-record management controllers."""
 
+from ... import workbuddy
+from ...ai import (
+    CODEX_DEFAULT_MODEL,
+    codex_auth_status,
+    codex_available_models,
+    codex_login,
+    codex_model_groups,
+    find_codex_binary,
+)
+from ...db import WORKBUDDY_DEFAULT_MODEL
 from ..runtime import (
     back_link,
     cgi,
@@ -164,7 +174,10 @@ class SettingsController:
                 result = import_questions(conn, question_file, import_id)
                 question_total = result["imported"] + result["updated"]
                 errors.extend(result["errors"])
-                flashes.append(("success", f"题目导入：新增 {result['imported']}，更新 {result['updated']}。"))
+                skipped = result.get("skipped", 0)
+                message = f"题目导入：新增 {result['imported']}，更新 {result['updated']}"
+                message += f"，跳过重复 {skipped}。" if skipped else "。"
+                flashes.append(("success", message))
             if answer_file is not None:
                 result = import_answers(conn, answer_file, import_id)
                 answer_total = result["imported"] + result["updated"]
@@ -176,19 +189,113 @@ class SettingsController:
             flashes.append(("error", f"还有 {len(errors) - 8} 条错误，请在导入记录中查看。"))
         self.page_import(flashes)
 
+    def _workbuddy_panel(self, settings):
+        """渲染 WorkBuddy 账号下拉与状态条。
+
+        账号来自 DSH 插件的凭据目录（本机已登录的账号），不在这里创建或删除，
+        只负责选择。任何读取异常都降级成提示文案，不能把设置页整个打挂。
+        """
+
+        selected = (settings["workbuddy_account"] or "").strip()
+        try:
+            accounts = workbuddy.list_accounts()
+        except workbuddy.WorkbuddyError as error:
+            return "", f'<p class="warning-note">{esc(str(error))}</p>'
+        except OSError as error:
+            return "", f'<p class="warning-note">读取账号目录失败：{esc(str(error))}</p>'
+
+        if not accounts:
+            return (
+                "",
+                '<p class="warning-note">尚未找到 WorkBuddy 账号。请先在 DSH 的 workbuddy 插件里登录，'
+                f"凭据会写入 {esc(str(workbuddy.vault_dir()))}。</p>",
+            )
+
+        has_selected = any(item["account_id"] == selected for item in accounts)
+        options = []
+        for item in accounts:
+            picked = " selected" if item["account_id"] == selected else ""
+            region_label = "国内" if item["region"] == "cn" else "国际"
+            options.append(
+                f'<option value="{esc(item["account_id"])}"{picked}>'
+                f'{esc(item["label"])} · {region_label}</option>'
+            )
+        if not has_selected and selected:
+            # 之前选的账号掉线了：明确提示，而不是静默换成别的账号
+            options.insert(
+                0,
+                f'<option value="{esc(selected)}" selected>已失效账号 · {esc(selected)}</option>',
+            )
+        option_html = "".join(options)
+
+        if has_selected or not selected:
+            active = accounts[0] if not selected else next(
+                item for item in accounts if item["account_id"] == selected
+            )
+            status_html = (
+                '<div class="codex-status is-ok"><span class="status-dot"></span>'
+                "<div><strong>已连接 WorkBuddy 账号池</strong>"
+                f"<small>{len(accounts)} 个可用账号 · 当前 {esc(active['label'])} · "
+                f"模型 {esc(WORKBUDDY_DEFAULT_MODEL)}</small></div></div>"
+            )
+        else:
+            status_html = (
+                '<div class="codex-status is-error"><span class="status-dot"></span>'
+                "<div><strong>当前账号已失效</strong>"
+                f"<small>{len(accounts)} 个可用账号，请重新选择一个</small></div></div>"
+            )
+        return option_html, status_html
+
     def page_settings(self, flashes=None):
         with connect(self.db_path) as conn:
             settings = conn.execute("SELECT * FROM ai_settings WHERE id = 1").fetchone()
-            agent_settings = conn.execute("SELECT * FROM agent_ai_settings WHERE id = 1").fetchone()
         mode_codex = " checked" if settings["mode"] == "codex" else ""
         mode_api = " checked" if settings["mode"] == "api" else ""
+        mode_chatgpt = " checked" if settings["mode"] == "chatgpt" else ""
+        mode_workbuddy = " checked" if settings["mode"] == "workbuddy" else ""
         grading_enhanced = " checked" if settings["grading_mode"] == "enhanced" else ""
         grading_basic = " checked" if (settings["grading_mode"] or "basic") == "basic" else ""
-        agent_inherits_grading = " checked" if agent_settings["use_grading_api"] else ""
-        agent_uses_custom = " checked" if not agent_settings["use_grading_api"] else ""
         key_status = masked_key(settings["api_key"]) or f"环境变量：{esc(settings['api_key_env'] or '未设置')}"
-        agent_key_status = masked_key(agent_settings["api_key"]) or (
-            f"环境变量：{esc(agent_settings['api_key_env'] or '未设置')}"
+        workbuddy_options, workbuddy_status_html = self._workbuddy_panel(settings)
+        codex_auth = codex_auth_status()
+        codex_groups = codex_model_groups()
+        codex_models = codex_groups["gpt"] + codex_groups["codex"]
+        codex_binary_found = bool(find_codex_binary())
+        if settings["model"] in codex_models:
+            current_model = settings["model"]
+        else:
+            current_model = (
+                CODEX_DEFAULT_MODEL
+                if CODEX_DEFAULT_MODEL in codex_groups["gpt"]
+                else (codex_groups["gpt"][0] if codex_groups["gpt"] else (codex_models[0] if codex_models else "gpt-5.5"))
+            )
+        codex_model_options = ""
+        for label, group_models in (
+            ("GPT 聊天模型", codex_groups["gpt"]),
+            ("Codex 编码模型", codex_groups["codex"]),
+        ):
+            if not group_models:
+                continue
+            inner = "".join(
+                f'<option value="{esc(model)}"{(" selected" if model == current_model else "")}>{esc(model)}</option>'
+                for model in group_models
+            )
+            codex_model_options += f'<optgroup label="{esc(label)}">{inner}</optgroup>'
+        if codex_auth["logged_in"]:
+            codex_status_html = (
+                '<div class="codex-status is-ok"><span class="status-dot"></span>'
+                f"<div><strong>已登录 ChatGPT 账号</strong>"
+                f"<small>{esc(codex_auth['last_refresh'] or '')} · 可自动调用模型，无需 API Key</small></div></div>"
+            )
+        else:
+            codex_status_html = (
+                '<div class="codex-status is-error"><span class="status-dot"></span>'
+                f"<div><strong>未登录</strong><small>{esc(codex_auth['error'] or '请先完成 ChatGPT 登录')}</small></div></div>"
+            )
+        codex_binary_warning = (
+            ""
+            if codex_binary_found
+            else '<p class="warning-note">未找到 codex 二进制，请先安装 ChatGPT 桌面应用或 Codex CLI。</p>'
         )
         body = f"""
         <section class="page-head settings-page-head">
@@ -198,47 +305,86 @@ class SettingsController:
         <section class="settings-layout">
           <div class="settings-column settings-main-column">
             <form class="settings-panel settings-ai-panel" method="post">
-            <div class="settings-section-heading"><span>01</span><div><h2>AI 批改与教练</h2><p>配置批改流程以及 AI 教练使用的模型服务。</p></div></div>
+            <div class="settings-section-heading"><span>01</span><div><h2>批改与训练分析</h2><p>配置批改流程以及训练分析使用的模型服务。</p></div></div>
             <div class="mode-grid">
               <label class="mode-card"><input type="radio" name="mode" value="codex"{mode_codex}><strong>Codex 手动模式</strong><span>生成批改包并复制到 Codex，报告可粘贴回来保存。</span></label>
               <label class="mode-card"><input type="radio" name="mode" value="api"{mode_api}><strong>API 自动模式</strong><span>调用 OpenAI-compatible 接口自动生成报告。</span></label>
+              <label class="mode-card"><input type="radio" name="mode" value="chatgpt"{mode_chatgpt}><strong>ChatGPT / Codex 账号</strong><span>用 ChatGPT 账号登录，自动调用模型批改与教练，无需 API Key。</span></label>
+              <label class="mode-card"><input type="radio" name="mode" value="workbuddy"{mode_workbuddy}><strong>WorkBuddy 账号</strong><span>复用 DSH 已登录的 WorkBuddy 账号池，固定用 Deepseek-V4.1-Flash，无需 API Key。</span></label>
             </div>
             <h3>API 批改能力</h3>
             <div class="mode-grid grading-mode-grid">
-              <label class="mode-card"><input type="radio" name="grading_mode" value="basic"{grading_basic}><strong>基础批改（默认·快速）</strong><span>直接批改当前题，等待更短，更快生成完整批改报告。</span></label>
-              <label class="mode-card"><input type="radio" name="grading_mode" value="enhanced"{grading_enhanced}><strong>智能批改</strong><span>综合本题材料与参考答案共识评分，并结合历史提供改进建议。</span></label>
+              <label class="mode-card"><input type="radio" name="grading_mode" value="basic"{grading_basic}><strong>基础批改（快速）</strong><span>单次调用直接批改，等待更短；无进度条、无逐句批注，适合快速看结论。</span></label>
+              <label class="mode-card"><input type="radio" name="grading_mode" value="enhanced"{grading_enhanced}><strong>智能批改（默认·推荐）</strong><span>先建评分基准再综合评分，带进度条与逐句批注，并结合历史提供改进建议。</span></label>
             </div>
             <div class="settings-fields">
               <label><span>服务商名称</span><input name="provider_name" value="{esc(settings["provider_name"])}" placeholder="DeepSeek"></label>
               <label><span>Base URL</span><input name="api_base_url" value="{esc(settings["api_base_url"])}" placeholder="https://api.deepseek.com"></label>
-              <label><span>模型名</span><input name="model" value="{esc(settings["model"])}" placeholder="deepseek-v4-pro"></label>
+              <label><span>模型名</span><input name="model" value="{esc(settings["model"])}" placeholder="deepseek-v4-flash"></label>
               <label><span>Temperature</span><input name="temperature" value="{esc(settings["temperature"])}" inputmode="decimal"></label>
               <label><span>API Key 环境变量</span><input name="api_key_env" value="{esc(settings["api_key_env"])}" placeholder="DEEPSEEK_API_KEY"></label>
               <label><span>API Key</span><input name="api_key" value="" autocomplete="off" placeholder="{esc(key_status)}"></label>
             </div>
             <label class="check-line"><input type="checkbox" name="clear_api_key" value="1"> 清除已保存的 API Key</label>
-            <p class="warning-note">API 自动模式会把题目、整卷材料、参考答案和你的答案发送给你配置的模型服务。</p>
-            <section class="coach-api-settings" id="ai-coach-settings" data-coach-api-settings>
+            <p class="warning-note">API 自动模式会把题目、整卷材料和你的答案发送给模型服务；非大作文批改还会发送所选参考答案。大作文在 ChatGPT / Codex 模式下可联网检索，API 模式会明确标记未联网。</p>
+            <section class="codex-settings-panel">
               <div class="settings-subheading">
-                <div><h3>AI 教练连接</h3><p>选择复用批改连接，或为教练单独指定模型。</p></div>
+                <div><h3>ChatGPT / Codex 账号连接</h3><p>复用本机 Codex 的 ChatGPT 登录（~/.codex），登录后即可自动调用模型。</p></div>
               </div>
-              <div class="mode-grid coach-connection-grid" role="radiogroup" aria-label="AI 教练连接方式">
-                <label class="mode-card"><input type="radio" name="agent_connection_mode" value="inherit"{agent_inherits_grading}><strong>沿用批改 API</strong><span>教练直接使用上方的服务商、模型和密钥。</span></label>
-                <label class="mode-card"><input type="radio" name="agent_connection_mode" value="custom"{agent_uses_custom}><strong>单独设置</strong><span>为教练配置另一套 OpenAI-compatible 服务。</span></label>
+              {codex_status_html}
+              {codex_binary_warning}
+              <div class="settings-fields">
+                <label><span>模型</span><select name="codex_model">{codex_model_options}</select></label>
               </div>
-              <div class="coach-api-collapsible" data-coach-api-fields aria-hidden="true">
-                <div class="coach-api-collapsible-inner">
-                  <div class="settings-fields">
-                    <label><span>服务商名称</span><input name="agent_provider_name" value="{esc(agent_settings["provider_name"])}" placeholder="DeepSeek"></label>
-                    <label><span>Base URL</span><input name="agent_api_base_url" value="{esc(agent_settings["api_base_url"])}" placeholder="https://api.deepseek.com"></label>
-                    <label><span>模型名</span><input name="agent_model" value="{esc(agent_settings["model"])}" placeholder="deepseek-v4-pro"></label>
-                    <label><span>Temperature</span><input name="agent_temperature" value="{esc(agent_settings["temperature"])}" inputmode="decimal"></label>
-                    <label><span>API Key 环境变量</span><input name="agent_api_key_env" value="{esc(agent_settings["api_key_env"])}" placeholder="DEEPSEEK_API_KEY"></label>
-                    <label><span>API Key</span><input name="agent_api_key" value="" autocomplete="off" placeholder="{esc(agent_key_status)}"></label>
-                  </div>
-                  <label class="check-line"><input type="checkbox" name="clear_agent_api_key" value="1"> 清除已保存的教练 API Key</label>
-                </div>
+              <p class="muted">GPT 聊天模型 = 通用对话档（gpt-5.x）；Codex 编码模型 = 编程 agent 档（sol/terra/luna）。均用同一 ChatGPT 账号调用。</p>
+              <div class="settings-actions">
+                <button class="button secondary" type="button" data-codex-login>打开登录 / 重新登录</button>
+                <button class="button ghost" type="button" data-codex-status>刷新状态</button>
               </div>
+              <p class="warning-note">「深度思考」开启时批改用高推理强度，关闭时用低推理强度；每次批改会消耗 ChatGPT/Codex 的用量额度。</p>
+            </section>
+            <section class="codex-settings-panel workbuddy-settings-panel">
+              <div class="settings-subheading">
+                <div><h3>WorkBuddy 账号连接</h3><p>复用 DSH 里已登录的 WorkBuddy 账号，切换账号即可换用量池，无需 API Key。</p></div>
+              </div>
+              {workbuddy_status_html}
+              <div class="settings-fields">
+                <label><span>使用账号</span><select name="workbuddy_account">{workbuddy_options}</select></label>
+                <label><span>模型</span><input value="{esc(WORKBUDDY_DEFAULT_MODEL)}" readonly></label>
+              </div>
+              <p class="muted">模型固定为 Deepseek-V4.1-Flash（WorkBuddy 上游 id：{esc(WORKBUDDY_DEFAULT_MODEL)}）。令牌过期会自动续期并写回 DSH 凭据，与插件共用同一份登录。</p>
+              <div class="settings-actions">
+                <button class="button secondary" type="button" data-workbuddy-test>测试当前账号</button>
+                <button class="button ghost" type="button" data-workbuddy-refresh>刷新账号列表</button>
+              </div>
+              <p class="warning-note" data-workbuddy-result hidden></p>
+            </section>
+            <script>{"".join([
+              "document.querySelectorAll('[data-codex-login]').forEach(function(b){b.addEventListener('click',function(){b.disabled=true;fetch('/settings/codex-login',{method:'POST'}).then(function(){location.reload()}).catch(function(){b.disabled=false})})});",
+              "document.querySelectorAll('[data-codex-status]').forEach(function(b){b.addEventListener('click',function(){location.reload()})});",
+              "(function(){",
+              "var out=document.querySelector('[data-workbuddy-result]');",
+              "var sel=document.querySelector('select[name=workbuddy_account]');",
+              "function show(msg,ok){if(!out){alert(msg);return}out.hidden=false;out.textContent=msg;out.style.color=ok?'':'var(--color-danger,#b42318)'}",
+              "var testBtn=document.querySelector('[data-workbuddy-test]');",
+              "if(testBtn){testBtn.addEventListener('click',function(){",
+              "testBtn.disabled=true;var old=testBtn.textContent;testBtn.textContent='测试中…';",
+              "var body=new URLSearchParams();body.set('account_id',sel?sel.value:'');",
+              "fetch('/settings/workbuddy-test',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body.toString()})",
+              ".then(function(r){return r.json()})",
+              ".then(function(d){show(d.ok?('连通正常：'+d.label+' · '+d.model+' · 回复「'+d.reply+'」'):('测试失败：'+d.error),d.ok)})",
+              ".catch(function(e){show('测试失败：'+e,false)})",
+              ".finally(function(){testBtn.disabled=false;testBtn.textContent=old})",
+              "})}",
+              "var refreshBtn=document.querySelector('[data-workbuddy-refresh]');",
+              "if(refreshBtn){refreshBtn.addEventListener('click',function(){location.reload()})}",
+              "})();",
+            ])}</script>
+            <section class="coach-api-settings" id="ai-coach-settings">
+              <div class="settings-subheading">
+                <div><h3>训练分析连接</h3><p>训练分析始终沿用上方批改服务，与批改保持一致。</p></div>
+              </div>
+              <p class="warning-note">教练直接使用上方的服务商、模型和密钥（当前模型：{esc(settings["model"])}）。修改批改设置后教练自动跟随。</p>
             </section>
             <button class="button primary" type="submit">保存设置</button>
             </form>
@@ -307,6 +453,7 @@ class SettingsController:
                 SELECT
                   (SELECT COUNT(*) FROM attempts) AS attempts,
                   (SELECT COUNT(*) FROM grading_reports) AS reports,
+                  (SELECT COUNT(*) FROM mistake_reviews) AS mistake_reviews,
                   (SELECT COUNT(*) FROM text_annotations) AS annotations,
                   (SELECT COUNT(*) FROM question_favorites) + (SELECT COUNT(*) FROM paper_favorites) AS favorites,
                   (SELECT COUNT(*) FROM agent_conversations) AS conversations,
@@ -336,10 +483,10 @@ class SettingsController:
               <span>危险操作</span>
             </div>
             <div class="local-record-options">
-              <label class="local-record-option"><input type="checkbox" name="record_scope" value="attempts"><span><strong>作答与批改</strong><small>{local_counts["attempts"]} 次作答 · {local_counts["reports"]} 份报告</small></span></label>
+              <label class="local-record-option"><input type="checkbox" name="record_scope" value="attempts"><span><strong>作答、批改与错题复盘</strong><small>{local_counts["attempts"]} 次作答 · {local_counts["reports"]} 份报告 · {local_counts["mistake_reviews"]} 条复盘状态</small></span></label>
               <label class="local-record-option"><input type="checkbox" name="record_scope" value="annotations"><span><strong>全部标注记录</strong><small>{local_counts["annotations"]} 组；批量清理不可撤回</small></span></label>
               <label class="local-record-option"><input type="checkbox" name="record_scope" value="favorites"><span><strong>收藏记录</strong><small>{local_counts["favorites"]} 个题目或试卷收藏</small></span></label>
-              <label class="local-record-option"><input type="checkbox" name="record_scope" value="agent"><span><strong>AI 教练记录</strong><small>{local_counts["conversations"]} 条线程 · {local_counts["messages"]} 条消息 · {local_counts["runs"]} 次运行</small></span></label>
+              <label class="local-record-option"><input type="checkbox" name="record_scope" value="agent"><span><strong>训练分析记录</strong><small>{local_counts["conversations"]} 条对话 · {local_counts["messages"]} 条消息 · {local_counts["runs"]} 次分析</small></span></label>
               <label class="local-record-option"><input type="checkbox" name="record_scope" value="plans"><span><strong>训练计划</strong><small>{local_counts["plans"]} 个计划项</small></span></label>
               <label class="local-record-option"><input type="checkbox" name="record_scope" value="browser"><span><strong>界面记忆与本地草稿</strong><small>筛选、滚动位置、草稿、计时、显示预设和面板宽度</small></span></label>
             </div>
@@ -355,68 +502,101 @@ class SettingsController:
         form = parse_qs(data)
         with connect(self.db_path) as conn:
             current = conn.execute("SELECT * FROM ai_settings WHERE id = 1").fetchone()
-            current_agent = conn.execute("SELECT * FROM agent_ai_settings WHERE id = 1").fetchone()
             api_key = form.get("api_key", [""])[0].strip()
             if form.get("clear_api_key", [""])[0] == "1":
                 api_key = ""
             elif not api_key:
                 api_key = current["api_key"]
-            agent_api_key = form.get("agent_api_key", [""])[0].strip()
-            if form.get("clear_agent_api_key", [""])[0] == "1":
-                agent_api_key = ""
-            elif not agent_api_key:
-                agent_api_key = current_agent["api_key"]
             try:
                 temperature = float(form.get("temperature", ["0.2"])[0] or 0.2)
             except ValueError:
                 temperature = 0.2
-            try:
-                agent_temperature = float(
-                    form.get("agent_temperature", [str(current_agent["temperature"])])[0] or 0.2
-                )
-            except ValueError:
-                agent_temperature = 0.2
+            mode = form.get("mode", ["api"])[0]
+            workbuddy_account = current["workbuddy_account"] or ""
+            if mode == "chatgpt":
+                provider_name = "ChatGPT"
+                api_base_url = "https://chatgpt.com"
+                gpt_models = codex_model_groups()["gpt"]
+                gpt_default = CODEX_DEFAULT_MODEL if CODEX_DEFAULT_MODEL in gpt_models else (gpt_models or ["gpt-5.5"])[0]
+                model = form.get("codex_model", [""])[0].strip() or gpt_default
+            elif mode == "workbuddy":
+                provider_name = "WorkBuddy"
+                api_base_url = workbuddy.UPSTREAM_BASE_URL
+                # 模型固定为 Deepseek-V4.1-Flash，不接受前端任意指定
+                model = WORKBUDDY_DEFAULT_MODEL
+                workbuddy_account = form.get("workbuddy_account", [""])[0].strip() or workbuddy_account
+                # 只接受当前账号池里有效的 id，失效值回退到已保存账号，避免落库脏数据
+                try:
+                    valid_ids = {item.get("account_id") for item in workbuddy.list_accounts()}
+                except Exception:
+                    valid_ids = set()
+                if valid_ids and workbuddy_account not in valid_ids:
+                    workbuddy_account = current["workbuddy_account"] or ""
+            else:
+                provider_name = form.get("provider_name", ["DeepSeek"])[0].strip() or "DeepSeek"
+                api_base_url = form.get("api_base_url", ["https://api.deepseek.com"])[0].strip() or "https://api.deepseek.com"
+                model = form.get("model", ["deepseek-v4-flash"])[0].strip() or "deepseek-v4-flash"
             conn.execute(
                 """
                 UPDATE ai_settings
                    SET mode = ?, provider_name = ?, api_base_url = ?, api_key = ?,
                        api_key_env = ?, model = ?, temperature = ?, grading_mode = ?,
+                       workbuddy_account = ?,
                        updated_at = CURRENT_TIMESTAMP
                  WHERE id = 1
                 """,
                 (
-                    form.get("mode", ["api"])[0],
-                    form.get("provider_name", ["DeepSeek"])[0].strip() or "DeepSeek",
-                    form.get("api_base_url", ["https://api.deepseek.com"])[0].strip() or "https://api.deepseek.com",
+                    mode,
+                    provider_name,
+                    api_base_url,
                     api_key,
                     form.get("api_key_env", ["DEEPSEEK_API_KEY"])[0].strip(),
-                    form.get("model", ["deepseek-v4-pro"])[0].strip() or "deepseek-v4-pro",
+                    model,
                     temperature,
                     form.get("grading_mode", ["basic"])[0]
                     if form.get("grading_mode", ["basic"])[0] in {"enhanced", "basic"}
                     else "basic",
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE agent_ai_settings
-                   SET use_grading_api = ?, provider_name = ?, api_base_url = ?, api_key = ?,
-                       api_key_env = ?, model = ?, temperature = ?, updated_at = CURRENT_TIMESTAMP
-                 WHERE id = 1
-                """,
-                (
-                    0 if form.get("agent_connection_mode", ["inherit"])[0] == "custom" else 1,
-                    form.get("agent_provider_name", [current_agent["provider_name"]])[0].strip()
-                    or "DeepSeek",
-                    form.get("agent_api_base_url", [current_agent["api_base_url"]])[0].strip()
-                    or "https://api.deepseek.com",
-                    agent_api_key,
-                    form.get("agent_api_key_env", [current_agent["api_key_env"]])[0].strip(),
-                    form.get("agent_model", [current_agent["model"]])[0].strip() or "deepseek-v4-pro",
-                    agent_temperature,
+                    workbuddy_account,
                 ),
             )
         self.page_settings([("success", "设置已保存。")])
+
+    def handle_workbuddy_test(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        data = self.rfile.read(length).decode("utf-8") if length else ""
+        form = parse_qs(data)
+        with connect(self.db_path) as conn:
+            settings = dict(conn.execute("SELECT * FROM ai_settings WHERE id = 1").fetchone())
+        account_id = form.get("account_id", [""])[0].strip() or (settings.get("workbuddy_account") or "")
+        try:
+            result = workbuddy.test_account(account_id or None)
+        except workbuddy.WorkbuddyError as error:
+            self.send_json({"ok": False, "error": str(error)})
+            return
+        except Exception as error:  # 网络/上游异常同样给出结构化结果，避免页面卡住
+            self.send_json({"ok": False, "error": f"{type(error).__name__}: {error}"})
+            return
+        self.send_json(
+            {
+                "ok": True,
+                "label": result.get("label", ""),
+                "model": result.get("model", WORKBUDDY_DEFAULT_MODEL),
+                "reply": result.get("reply", ""),
+            }
+        )
+
+    def handle_codex_login(self):
+        ok, message = codex_login()
+        self.page_settings([("success", message) if ok else ("error", message)])
+
+    def handle_codex_status(self):
+        self.send_json(
+            {
+                "auth": codex_auth_status(),
+                "models": codex_available_models(),
+                "binary_found": bool(find_codex_binary()),
+            }
+        )
 
     def handle_settings_local_records_clear(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -443,7 +623,7 @@ class SettingsController:
             if "agent" in scopes:
                 conn.execute("DELETE FROM agent_conversations")
                 conn.execute("DELETE FROM agent_runs")
-                labels.append("AI 教练记录")
+                labels.append("训练分析记录")
             if "plans" in scopes:
                 conn.execute("DELETE FROM training_plan_items")
                 labels.append("训练计划")
@@ -490,7 +670,7 @@ class SettingsController:
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             self.page_settings([("error", f"导入失败：{exc}")])
             return
-        message = "导入完成：作答 {attempts} 条，报告 {reports} 份，标注 {annotations} 组，对话 {conversations} 次，消息 {messages} 条，计划项 {training_plan_items} 个，配置 {settings} 项。".format(
+        message = "导入完成：作答 {attempts} 条，报告 {reports} 份，错题复盘 {mistake_reviews} 条，标注 {annotations} 组，对话 {conversations} 次，消息 {messages} 条，计划项 {training_plan_items} 个，配置 {settings} 项。".format(
             **counts
         )
         skipped = (
@@ -498,13 +678,14 @@ class SettingsController:
             + counts.get("skipped_reports", 0)
             + counts.get("skipped_question_favorites", 0)
             + counts.get("skipped_paper_favorites", 0)
+            + counts.get("skipped_mistake_reviews", 0)
             + counts.get("skipped_annotations", 0)
             + counts.get("skipped_conversations", 0)
             + counts.get("skipped_messages", 0)
             + counts.get("skipped_training_plan_items", 0)
         )
         if skipped:
-            message += " 另有 {skipped_attempts} 条作答、{skipped_reports} 份报告、{skipped_annotations} 组标注、{skipped_conversations} 次对话、{skipped_messages} 条消息、{skipped_training_plan_items} 个计划项因目标无法匹配被跳过。".format(
+            message += " 另有 {skipped_attempts} 条作答、{skipped_reports} 份报告、{skipped_mistake_reviews} 条错题复盘、{skipped_annotations} 组标注、{skipped_conversations} 次对话、{skipped_messages} 条消息、{skipped_training_plan_items} 个计划项因目标无法匹配被跳过。".format(
                 **counts
             )
         self.page_settings([("success", message)])

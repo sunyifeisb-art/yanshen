@@ -73,3 +73,11 @@ docs/interview/
 docs/releases/
 
 
+
+.venv/
+data/pre2020_pdfs/
+data/pre2020_txt/
+data/pre2020_json/
+data/*.bak*
+.backup-combo-format-fix-20260926/
+.playwright-mcp/

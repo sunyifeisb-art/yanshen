@@ -6,6 +6,8 @@ from pathlib import Path
 
 CURRENT_SCHEMA_VERSION = 6
 BUILT_IN_QUESTION_PREFIX = "GKS-"
+# WorkBuddy 账号模式的固定模型（用户指定：ds flash 4.1）
+WORKBUDDY_DEFAULT_MODEL = "deepseek-v4.1-flash"
 
 
 SCHEMA = """
@@ -87,6 +89,15 @@ CREATE TABLE IF NOT EXISTS question_sources (
     extracted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(question_id, provider, source_name, source_path, source_url)
 );
+
+CREATE TABLE IF NOT EXISTS question_code_aliases (
+    alias_code TEXT PRIMARY KEY,
+    question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_code_aliases_question
+ON question_code_aliases(question_id);
 
 CREATE TABLE IF NOT EXISTS reference_answers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,6 +215,26 @@ CREATE TABLE IF NOT EXISTS grading_feedback (
 CREATE INDEX IF NOT EXISTS idx_grading_feedback_question
 ON grading_feedback(question_id, point_key, scope, updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS mistake_reviews (
+    issue_key TEXT PRIMARY KEY,
+    report_id INTEGER NOT NULL REFERENCES grading_reports(id) ON DELETE CASCADE,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+    question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'reviewing', 'mastered')),
+    is_starred INTEGER NOT NULL DEFAULT 0 CHECK (is_starred IN (0, 1)),
+    note TEXT NOT NULL DEFAULT '',
+    review_count INTEGER NOT NULL DEFAULT 0,
+    last_reviewed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_mistake_reviews_question
+ON mistake_reviews(question_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_mistake_reviews_state
+ON mistake_reviews(state, is_starred, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS question_favorites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     question_id INTEGER NOT NULL UNIQUE REFERENCES questions(id) ON DELETE CASCADE,
@@ -240,10 +271,11 @@ CREATE TABLE IF NOT EXISTS ai_settings (
     api_base_url TEXT NOT NULL DEFAULT 'https://api.deepseek.com',
     api_key TEXT NOT NULL DEFAULT '',
     api_key_env TEXT NOT NULL DEFAULT 'DEEPSEEK_API_KEY',
-    model TEXT NOT NULL DEFAULT 'deepseek-v4-pro',
+    model TEXT NOT NULL DEFAULT 'deepseek-v4-flash',
     temperature REAL NOT NULL DEFAULT 0.2,
     prompt_template TEXT NOT NULL DEFAULT '',
-    grading_mode TEXT NOT NULL DEFAULT 'basic',
+    grading_mode TEXT NOT NULL DEFAULT 'enhanced',
+    workbuddy_account TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -578,6 +610,100 @@ CREATE TABLE IF NOT EXISTS coverage_targets (
     UNIQUE(year, exam_type, region, paper_name)
 );
 
+CREATE TABLE IF NOT EXISTS political_quiz_packs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pack_key TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    exam_scope TEXT NOT NULL DEFAULT 'national' CHECK (exam_scope IN ('national', 'province')),
+    province TEXT NOT NULL DEFAULT '',
+    period_label TEXT NOT NULL DEFAULT '',
+    question_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('generating', 'ready', 'failed')),
+    verification_status TEXT NOT NULL DEFAULT 'generated' CHECK (verification_status IN ('generated', 'verified')),
+    source_count INTEGER NOT NULL DEFAULT 0,
+    data_json TEXT NOT NULL DEFAULT '{}',
+    generation_prompt TEXT NOT NULL DEFAULT '',
+    generation_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_political_quiz_packs_period
+ON political_quiz_packs(exam_scope, province, verification_status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS political_quiz_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pack_id INTEGER NOT NULL REFERENCES political_quiz_packs(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL DEFAULT 'practice' CHECK (mode IN ('practice', 'exam')),
+    answers_json TEXT NOT NULL DEFAULT '{}',
+    correct_count INTEGER NOT NULL DEFAULT 0,
+    question_count INTEGER NOT NULL DEFAULT 0,
+    elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_political_quiz_attempts_pack
+ON political_quiz_attempts(pack_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS idiom_progress (
+    entry_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'unseen' CHECK (status IN ('unseen', 'learning', 'mastered')),
+    is_starred INTEGER NOT NULL DEFAULT 0 CHECK (is_starred IN (0, 1)),
+    review_count INTEGER NOT NULL DEFAULT 0,
+    correct_count INTEGER NOT NULL DEFAULT 0,
+    wrong_count INTEGER NOT NULL DEFAULT 0,
+    last_reviewed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_idiom_progress_status
+ON idiom_progress(status, is_starred, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS normative_expressions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    expression TEXT NOT NULL,
+    expression_key TEXT NOT NULL UNIQUE,
+    category TEXT NOT NULL DEFAULT '其他规范表达',
+    status TEXT NOT NULL DEFAULT 'learning' CHECK (status IN ('learning', 'mastered', 'hidden')),
+    is_starred INTEGER NOT NULL DEFAULT 0 CHECK (is_starred IN (0, 1)),
+    is_custom INTEGER NOT NULL DEFAULT 0 CHECK (is_custom IN (0, 1)),
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_normative_expressions_state
+ON normative_expressions(status, is_starred, category, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS normative_expression_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    expression_id INTEGER NOT NULL REFERENCES normative_expressions(id) ON DELETE CASCADE,
+    report_id INTEGER REFERENCES grading_reports(id) ON DELETE CASCADE,
+    question_id INTEGER REFERENCES questions(id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL DEFAULT 'rubric',
+    match_status TEXT NOT NULL DEFAULT '',
+    trigger_signal TEXT NOT NULL DEFAULT '',
+    context_text TEXT NOT NULL DEFAULT '',
+    wrong_expression TEXT NOT NULL DEFAULT '',
+    source_label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_normative_expression_evidence_expression
+ON normative_expression_evidence(expression_id, report_id, question_id);
+
+CREATE INDEX IF NOT EXISTS idx_normative_expression_evidence_report
+ON normative_expression_evidence(report_id, expression_id);
+
+CREATE TABLE IF NOT EXISTS normative_expression_ingest_state (
+    report_id INTEGER PRIMARY KEY REFERENCES grading_reports(id) ON DELETE CASCADE,
+    signature TEXT NOT NULL DEFAULT '',
+    ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS release_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -618,6 +744,7 @@ REQUIRED_SCHEMA_COLUMNS = {
 CURRENT_SCHEMA_ADDITIVE_COLUMNS = {
     "questions": (("content_hash", "TEXT NOT NULL DEFAULT ''"),),
     "attempts": (("answer_format_json", "TEXT NOT NULL DEFAULT '[]'"),),
+    "ai_settings": (("workbuddy_account", "TEXT NOT NULL DEFAULT ''"),),
     "agent_context_chunks": (("content_hash", "TEXT NOT NULL DEFAULT ''"),),
     "agent_context_vectors": (("content_hash", "TEXT NOT NULL DEFAULT ''"),),
     "agent_context_dense_vectors": (
@@ -632,6 +759,26 @@ CURRENT_SCHEMA_ADDITIVE_COLUMNS = {
 }
 
 CURRENT_SCHEMA_ADDITIONS = """
+CREATE TABLE IF NOT EXISTS mistake_reviews (
+    issue_key TEXT PRIMARY KEY,
+    report_id INTEGER NOT NULL REFERENCES grading_reports(id) ON DELETE CASCADE,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+    question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'reviewing', 'mastered')),
+    is_starred INTEGER NOT NULL DEFAULT 0 CHECK (is_starred IN (0, 1)),
+    note TEXT NOT NULL DEFAULT '',
+    review_count INTEGER NOT NULL DEFAULT 0,
+    last_reviewed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_mistake_reviews_question
+ON mistake_reviews(question_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_mistake_reviews_state
+ON mistake_reviews(state, is_starred, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS agent_ai_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     use_grading_api INTEGER NOT NULL DEFAULT 1 CHECK (use_grading_api IN (0, 1)),
@@ -670,13 +817,124 @@ CREATE TABLE IF NOT EXISTS agent_context_worker_state (
 );
 
 INSERT OR IGNORE INTO agent_context_worker_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS political_quiz_packs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pack_key TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    exam_scope TEXT NOT NULL DEFAULT 'national' CHECK (exam_scope IN ('national', 'province')),
+    province TEXT NOT NULL DEFAULT '',
+    period_label TEXT NOT NULL DEFAULT '',
+    question_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('generating', 'ready', 'failed')),
+    verification_status TEXT NOT NULL DEFAULT 'generated' CHECK (verification_status IN ('generated', 'verified')),
+    source_count INTEGER NOT NULL DEFAULT 0,
+    data_json TEXT NOT NULL DEFAULT '{}',
+    generation_prompt TEXT NOT NULL DEFAULT '',
+    generation_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_political_quiz_packs_period
+ON political_quiz_packs(exam_scope, province, verification_status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS political_quiz_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pack_id INTEGER NOT NULL REFERENCES political_quiz_packs(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL DEFAULT 'practice' CHECK (mode IN ('practice', 'exam')),
+    answers_json TEXT NOT NULL DEFAULT '{}',
+    correct_count INTEGER NOT NULL DEFAULT 0,
+    question_count INTEGER NOT NULL DEFAULT 0,
+    elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_political_quiz_attempts_pack
+ON political_quiz_attempts(pack_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS idiom_progress (
+    entry_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'unseen' CHECK (status IN ('unseen', 'learning', 'mastered')),
+    is_starred INTEGER NOT NULL DEFAULT 0 CHECK (is_starred IN (0, 1)),
+    review_count INTEGER NOT NULL DEFAULT 0,
+    correct_count INTEGER NOT NULL DEFAULT 0,
+    wrong_count INTEGER NOT NULL DEFAULT 0,
+    last_reviewed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_idiom_progress_status
+ON idiom_progress(status, is_starred, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS normative_expressions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    expression TEXT NOT NULL,
+    expression_key TEXT NOT NULL UNIQUE,
+    category TEXT NOT NULL DEFAULT '其他规范表达',
+    status TEXT NOT NULL DEFAULT 'learning' CHECK (status IN ('learning', 'mastered', 'hidden')),
+    is_starred INTEGER NOT NULL DEFAULT 0 CHECK (is_starred IN (0, 1)),
+    is_custom INTEGER NOT NULL DEFAULT 0 CHECK (is_custom IN (0, 1)),
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_normative_expressions_state
+ON normative_expressions(status, is_starred, category, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS normative_expression_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    expression_id INTEGER NOT NULL REFERENCES normative_expressions(id) ON DELETE CASCADE,
+    report_id INTEGER REFERENCES grading_reports(id) ON DELETE CASCADE,
+    question_id INTEGER REFERENCES questions(id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL DEFAULT 'rubric',
+    match_status TEXT NOT NULL DEFAULT '',
+    trigger_signal TEXT NOT NULL DEFAULT '',
+    context_text TEXT NOT NULL DEFAULT '',
+    wrong_expression TEXT NOT NULL DEFAULT '',
+    source_label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_normative_expression_evidence_expression
+ON normative_expression_evidence(expression_id, report_id, question_id);
+
+CREATE INDEX IF NOT EXISTS idx_normative_expression_evidence_report
+ON normative_expression_evidence(report_id, expression_id);
+
+CREATE TABLE IF NOT EXISTS normative_expression_ingest_state (
+    report_id INTEGER PRIMARY KEY REFERENCES grading_reports(id) ON DELETE CASCADE,
+    signature TEXT NOT NULL DEFAULT '',
+    ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS question_code_aliases (
+    alias_code TEXT PRIMARY KEY,
+    question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_code_aliases_question
+ON question_code_aliases(question_id);
 """
 CURRENT_SCHEMA_ADDITIVE_TABLES = frozenset(
     {
+        "mistake_reviews",
         "agent_ai_settings",
         "agent_context_vectors",
         "agent_context_fts",
         "agent_context_worker_state",
+        "political_quiz_packs",
+        "political_quiz_attempts",
+        "idiom_progress",
+        "normative_expressions",
+        "normative_expression_evidence",
+        "normative_expression_ingest_state",
+        "question_code_aliases",
     }
 )
 
@@ -774,6 +1032,19 @@ def _initialize_index_worker(conn):
     _ensure_index_queue_triggers(conn)
 
 
+def _refresh_attempt_word_counts(conn):
+    """Keep saved counts aligned with the current answer-sheet cell rules."""
+    from .grading import count_cjk_chars
+
+    changed = [
+        (count, row["id"])
+        for row in conn.execute("SELECT id, answer_text, word_count FROM attempts")
+        if (count := count_cjk_chars(row["answer_text"])) != row["word_count"]
+    ]
+    if changed:
+        conn.executemany("UPDATE attempts SET word_count = ? WHERE id = ?", changed)
+
+
 def _migrate_current_schema(conn, existing_tables):
     """Repair known additive drift inside the current schema version only."""
     missing_tables = REQUIRED_SCHEMA_TABLES - existing_tables
@@ -863,6 +1134,7 @@ def init_db(db_path):
                 seed_ai_settings(conn)
                 seed_agent_ai_settings(conn)
                 seed_coverage_targets(conn)
+                _refresh_attempt_word_counts(conn)
                 conn.execute(
                     """
                     UPDATE grading_jobs
@@ -1130,13 +1402,38 @@ def sync_seed_content(db_path, seed_path):
 
 
 def seed_ai_settings(conn):
+    # 新装/首次初始化时默认选中 WorkBuddy 账号模式，模型固定 Deepseek-V4.1-Flash。
+    # INSERT OR IGNORE：已有设置行（用户自己选过的模式）不会被覆盖。
     conn.execute(
         """
         INSERT OR IGNORE INTO ai_settings (
             id, mode, provider_name, api_base_url, api_key_env, model, temperature
-        ) VALUES (1, 'api', 'DeepSeek', 'https://api.deepseek.com', 'DEEPSEEK_API_KEY', 'deepseek-v4-pro', 0.2)
-        """
+        ) VALUES (1, 'workbuddy', 'WorkBuddy', 'https://copilot.tencent.com',
+                  '', ?, 0.2)
+        """,
+        (WORKBUDDY_DEFAULT_MODEL,),
     )
+    # 历史库里若已经是 workbuddy 模式但模型为空，补成固定模型。
+    conn.execute(
+        """
+        UPDATE ai_settings SET model = ?
+         WHERE id = 1 AND mode = 'workbuddy' AND (model IS NULL OR model = '')
+        """,
+        (WORKBUDDY_DEFAULT_MODEL,),
+    )
+    # 一次性把老库的“基础批改”升级为“智能批改”（升级标记只写一次）。
+    # 基础批改是单次调用：没有进度条、没有批注、压缩只跑一轮，超限稿会原样入库。
+    # 用 release_metadata 打标记，升级后用户仍可自己改回 basic，不会被反复改回去。
+    upgraded = conn.execute(
+        "SELECT value FROM release_metadata WHERE key = 'grading_mode_default_enhanced'"
+    ).fetchone()
+    if not upgraded:
+        conn.execute(
+            "UPDATE ai_settings SET grading_mode = 'enhanced' WHERE id = 1 AND grading_mode = 'basic'"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO release_metadata (key, value) VALUES ('grading_mode_default_enhanced', CURRENT_TIMESTAMP)"
+        )
 
 
 def seed_agent_ai_settings(conn):

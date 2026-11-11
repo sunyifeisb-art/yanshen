@@ -579,7 +579,14 @@ def compute_ragas_metrics(settings, case, final_text, retrieved_contexts):
     api_key = resolve_api_key(settings) if settings else ""
     if not api_key:
         metrics["ragas_status"] = "skipped_no_model"
-        metrics["ragas_errors"]["model"] = "当前没有可用模型连接，无法运行模型评审指标。"
+        if (settings or {}).get("mode") == "workbuddy":
+            # WorkBuddy 账号池不是 OpenAI 客户端，Ragas 这条独立评测链无法直接复用；
+            # 批改与教练不受影响，只有模型评审指标跳过。
+            metrics["ragas_errors"]["model"] = (
+                "WorkBuddy 账号模式下不运行模型评审指标（批改与教练正常）。"
+            )
+        else:
+            metrics["ragas_errors"]["model"] = "当前没有可用模型连接，无法运行模型评审指标。"
         return metrics
 
     try:
@@ -600,7 +607,7 @@ def compute_ragas_metrics(settings, case, final_text, retrieved_contexts):
         client = components["OpenAI"](
             api_key=api_key,
             base_url=_normalize_base_url(settings["api_base_url"]),
-            timeout=120,
+            timeout=180,
         )
         ragas_llm = components["llm_factory"](
             (settings["model"] or "").strip(),

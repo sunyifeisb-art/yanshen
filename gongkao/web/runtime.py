@@ -10,6 +10,7 @@ import os
 import re
 import threading
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,15 +44,21 @@ from ..db import connect, init_db, prepare_user_database
 from ..grading import (
     build_ai_prompt,
     build_grading_package,
+    build_grading_package_zip,
     build_revised_answer_retry_prompt,
+    compact_revised_answer_linebreaks,
     count_cjk_chars,
     normalize_revised_answer_word_count,
+    parse_imported_grading_report,
     parse_revised_answer_repair,
     referenced_material_numbers,
     replace_revised_answer_body,
+    revised_answer_body,
+    revised_answer_overwrites_original,
     revised_answer_word_count_status,
     select_relevant_materials,
     should_use_whole_paper_materials,
+    split_revised_answer_section,
 )
 from ..grading_pipeline.orchestration import (
     ACTIVE_JOB_STATUSES,
@@ -72,6 +79,7 @@ from ..services.personal_records import (
     export_personal_data,
     import_personal_data,
     normalize_text_annotations,
+    paper_material_annotations,
     save_text_annotations,
     text_annotation_key,
 )
@@ -86,8 +94,8 @@ DB_PATH = user_db_path()
 DEFAULT_APP_CONTEXT = ApplicationContext.create(DB_PATH, ROOT)
 AUTOSAVE_LOCK = DEFAULT_APP_CONTEXT.autosave.lock
 AUTOSAVE_REVISIONS = DEFAULT_APP_CONTEXT.autosave.revisions
-APP_VERSION = "1.4.2"
-APP_BUILD = "1.4.2.1"
+APP_VERSION = "1.5.7"
+APP_BUILD = "1.5.0.0"
 ASSET_VERSION = f"gk-{APP_BUILD.replace('.', '-')}"
 
 FILTER_RESTORE_BOOTSTRAP = ""
@@ -465,7 +473,7 @@ def render_agent_thread_list(conversations, active_conversation_id=None, return_
         for conversation in items:
             active = " active" if conversation["id"] == active_conversation_id else ""
             updated_at = format_beijing_time(conversation["updated_at"])
-            title_text = conversation["title"] or "AI 教练对话"
+            title_text = conversation["title"] or "训练分析对话"
             rows.append(
                 f"""
                 <article class="agent-thread-row{active}" data-updated="{esc(updated_at)}">
@@ -473,7 +481,7 @@ def render_agent_thread_list(conversations, active_conversation_id=None, return_
                     <strong>{esc(title_text)}</strong>
                     <span class="agent-thread-time">{esc(updated_at)}</span>
                   </a>
-                  <form method="post" action="/agent/conversations/{conversation["id"]}/delete" data-confirm="删除这条教练线程吗？">
+                  <form method="post" action="/agent/conversations/{conversation["id"]}/delete" data-confirm="删除这条分析记录吗？">
                     <input type="hidden" name="return_to" value="{esc(return_to)}">
                     <button class="agent-thread-delete-button" type="submit" aria-label="删除线程">×</button>
                   </form>
@@ -488,7 +496,7 @@ def render_agent_thread_list(conversations, active_conversation_id=None, return_
         )
     if sections:
         return "".join(sections)
-    return '<p class="muted agent-thread-empty">还没有教练线程。直接问一句“我今天练什么”就能开始。</p>'
+    return '<p class="muted agent-thread-empty">还没有分析记录。直接问一句“我今天练什么”就能开始。</p>'
 
 
 def attempt_grading_references(attempt, references):
@@ -791,7 +799,7 @@ QUESTION_WORK_STATUS_OPTIONS = [
     ("graded", "已批改"),
     ("ungraded", "未批改"),
 ]
-YEAR_FILTER_MIN = 2020
+YEAR_FILTER_MIN = 2015
 YEAR_FILTER_MAX = max(2026, datetime.now().year)
 PAPER_WORK_STATUS_OPTIONS = [
     ("", "全部"),
@@ -960,7 +968,14 @@ def tabbed_materials(
         tab_header = (
             '<div class="content-tabs-row">'
             f'<div class="content-tabs" role="tablist" aria-label="相关材料">{"".join(tabs)}</div>'
+            '<div class="material-tools">'
+            '<div class="material-font-controls" data-material-font-controls aria-label="材料字号">'
+            '<button type="button" data-material-font-size-down aria-label="缩小材料字号" title="缩小材料字号">A−</button>'
+            '<span data-material-font-size-value aria-live="polite">16</span>'
+            '<button type="button" data-material-font-size-up aria-label="放大材料字号" title="放大材料字号">A+</button>'
+            '</div>'
             '<button class="button small ghost" type="button" data-clear-active-material-highlights>清除本材料标注</button>'
+            '</div>'
             "</div>"
         )
     else:
@@ -1362,6 +1377,98 @@ def _is_table_separator(line):
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
 
 
+def render_revision_diff(original_text, revised_text):
+    """Render a tracked-changes view that keeps the user's original answer visible."""
+    original = str(original_text or "").strip()
+    revised = str(revised_text or "").strip()
+    if not revised:
+        return '<p class="grading-revision-empty">未生成有效修改版答案。</p>'
+    if not original:
+        return f'<div class="grading-revision-document"><ins>{esc(revised)}</ins></div>'
+    if revised_answer_overwrites_original(original, revised):
+        return (
+            '<section class="grading-revision" data-grading-revision>'
+            '<p class="grading-revision-meta is-warning">这份修改稿改写幅度过大，无法可靠地逐处标注。'
+            '下面完整保留你的原答案；请结合优化建议查看。</p>'
+            f'<div class="grading-revision-document">{esc(original)}</div>'
+            '<details class="grading-revision-clean">'
+            '<summary>查看 AI 改写稿</summary>'
+            f'<div>{esc(revised)}</div>'
+            '</details>'
+            '</section>'
+        )
+
+    matcher = SequenceMatcher(None, original, revised, autojunk=False)
+    chunks = []
+    deleted_blocks = 0
+    inserted_blocks = 0
+    replaced_blocks = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        old = original[i1:i2]
+        new = revised[j1:j2]
+        if tag == "equal":
+            chunks.append(esc(old))
+        elif tag == "delete":
+            deleted_blocks += 1
+            chunks.append(f'<del>{esc(old)}</del>')
+        elif tag == "insert":
+            inserted_blocks += 1
+            chunks.append(f'<ins>{esc(new)}</ins>')
+        elif tag == "replace":
+            replaced_blocks += 1
+            chunks.append(f'<del>{esc(old)}</del><ins>{esc(new)}</ins>')
+
+    summary_parts = []
+    if replaced_blocks:
+        summary_parts.append(f"替换 {replaced_blocks} 处")
+    if deleted_blocks:
+        summary_parts.append(f"删除 {deleted_blocks} 处")
+    if inserted_blocks:
+        summary_parts.append(f"补充 {inserted_blocks} 处")
+    summary = " · ".join(summary_parts) or "原答案无需文字改动"
+    return (
+        '<section class="grading-revision" data-grading-revision>'
+        '<div class="grading-revision-legend">'
+        '<span><i class="is-delete"></i>删除</span>'
+        '<span><i class="is-insert"></i>新增 / 替换</span>'
+        f'<small>{esc(summary)}</small>'
+        '</div>'
+        f'<div class="grading-revision-document">{"".join(chunks)}</div>'
+        '<details class="grading-revision-clean">'
+        '<summary>查看最终清洁版</summary>'
+        f'<div>{esc(revised)}</div>'
+        '</details>'
+        '</section>'
+    )
+
+
+def _render_revised_answer_section(section_lines, source_text):
+    lines = list(section_lines)
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    meta = []
+    while lines:
+        current = lines[0].strip()
+        if current.startswith("实际字数：") or current.startswith("> 系统提示："):
+            meta.append(lines.pop(0).strip())
+            while lines and not lines[0].strip():
+                lines.pop(0)
+            continue
+        break
+    revised = "\n".join(lines).strip()
+    meta_html = "".join(
+        f'<p class="grading-revision-meta{(" is-warning" if item.startswith(">") else "")}">{inline_markdown(item.lstrip("> "))}</p>'
+        for item in meta
+    )
+    if source_text and revised:
+        return meta_html + render_revision_diff(source_text, revised)
+    fallback = "".join(f"<p>{inline_markdown(line)}</p>" for line in lines if line.strip())
+    return meta_html + (fallback or '<p class="grading-revision-empty">未生成有效修改版答案。</p>')
+
+
 def markdownish(value, return_to="", source_text="", annotation_scope="grading-annotation"):
     lines = (value or "").splitlines()
     output = []
@@ -1429,6 +1536,19 @@ def markdownish(value, return_to="", source_text="", annotation_scope="grading-a
                 f'<div class="report-table-wrap"><table class="report-table{table_class}"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
             )
             continue
+        if line == "## 修改版答案":
+            close_lists()
+            output.append("<h2>修改版答案</h2>")
+            index += 1
+            revised_lines = []
+            while index < len(lines):
+                candidate = lines[index].strip()
+                if candidate.startswith("## ") or candidate.startswith("# "):
+                    break
+                revised_lines.append(lines[index])
+                index += 1
+            output.append(_render_revised_answer_section(revised_lines, source_text))
+            continue
         if line.startswith("### "):
             close_lists()
             output.append(f"<h3>{inline_markdown(line[4:], return_to)}</h3>")
@@ -1471,6 +1591,60 @@ def hide_internal_score_calibration(value):
         str(value or ""),
     )
     return re.sub(r"(?m)^-\s*整体调整理由：\s*(?:\r?\n|$)", "", cleaned)
+
+
+ANNOTATION_KIND_LABELS = {
+    "good": "好",
+    "polish": "润色",
+    "change": "可改",
+    "delete": "删",
+    "add": "补",
+    "critical": "关键",
+}
+
+
+def smart_annotations_markdown(annotations):
+    """Turn smart-grading result annotations into the inline markers that
+    markdownish already renders (source snapshot + numbered comment cards).
+
+    Without this the structured annotations never reached the page: smart
+    grading stores JSON, while only basic grading wrote the inline markers.
+    """
+    lines = []
+    for item in annotations or []:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "change").strip().lower()
+        label = ANNOTATION_KIND_LABELS.get(kind)
+        if not label:
+            continue
+        quote = str(item.get("quote") or "").strip()
+        anchor = str(item.get("anchor") or "").strip()
+        reason = re.sub(r"\s+", " ", str(item.get("reason") or "")).strip()
+        replacement = re.sub(r"\s+", " ", str(item.get("replacement") or "")).strip()
+        if kind == "add":
+            if not anchor:
+                continue
+            # 补：文本位放拟补文字，第三位放插入锚点句。
+            lines.append(f"[{label}|{replacement or reason}|{reason}|{anchor}||]")
+            continue
+        if not quote:
+            continue
+        note = reason or item.get("label") or "建议修改"
+        severity = str(item.get("severity") or "").strip().lower()
+        severity_slot = severity if severity in GRADING_SEVERITIES else ""
+        # 标记位序：原文|点评|锚点|严重度|建议，空锚点占位不能省，否则建议会掉位。
+        lines.append(f"[{label}|{quote}|{note}||{severity_slot}|{replacement}]")
+    return "\n".join(lines)
+
+
+def append_smart_annotations(report_text, annotations, original_answer=""):
+    """Append a review section built from smart-grading annotations."""
+    block = smart_annotations_markdown(annotations)
+    if not block:
+        return report_text
+    del original_answer  # 定位校验由 markdownish 用真实快照完成。
+    return f"{report_text.rstrip()}\n\n## 原答案逐句批注\n{block}\n"
 
 
 def split_agent_structured_json(value):
@@ -1530,9 +1704,9 @@ def render_agent_structured_output(data, return_to=""):
         return ""
     return f"""
     <details class="agent-structured-output">
-      <summary><strong>结构化提取</strong><span>{esc(data.get("summary") or "用于系统提取短板、行动项和推荐题")}</span></summary>
+      <summary><strong>分析摘要</strong><span>{esc(data.get("summary") or "短板、下一步和推荐题")}</span></summary>
       <div class="agent-structured-content">
-        <p class="muted">这是 AI 回复末尾的机器可读 JSON 渲染结果，主要用于系统记录行动项和评测；正文回答仍以上方内容为准。</p>
+        <p class="muted">系统从本次回答中整理出的短板、行动项和推荐题。</p>
         {f"<p>{esc(data.get('summary'))}</p>" if data.get("summary") else ""}
         {f'<div class="agent-structured-grid">{weakness_rows}</div>' if weakness_rows else ""}
         {f'<div class="agent-structured-grid">{action_rows}</div>' if action_rows else ""}
@@ -1555,11 +1729,24 @@ def _agent_rag_source_label(source_type):
         "reference_answer": "参考",
         "knowledge": "教材",
         "aggregate": "统计",
-        "weakness_profile": "画像",
+        "weakness_profile": "短板统计",
         "candidate_question": "候选题",
         "report": "报告",
         "note": "笔记",
     }.get(source_type or "", source_type or "证据")
+
+
+def _agent_rag_route_label(route):
+    return {
+        "current_attempt_review": "本题复盘",
+        "structure_judgement": "结构分析",
+        "rewrite_attempt": "答案修改",
+        "recommend_questions": "练习推荐",
+        "note_organization": "笔记整理",
+        "writing_guidance": "写法查询",
+        "module_diagnosis": "题型分析",
+        "overview_diagnosis": "综合分析",
+    }.get(route or "", "分析依据")
 
 
 def _agent_rag_card_href(card, return_to=""):
@@ -1640,14 +1827,14 @@ def render_agent_rag_panel(metadata, return_to=""):
     return f"""
     <details class="agent-rag-panel agent-insight-disclosure">
       <summary>
-        <span class="agent-insight-title"><strong>本次依据</strong><small>{esc(rag.get("rag_route") or "RAG")}</small></span>
+        <span class="agent-insight-title"><strong>本次依据</strong><small>{esc(_agent_rag_route_label(rag.get("rag_route")))}</small></span>
         <span class="agent-rag-sufficiency {esc(level)}">{esc(label)}</span>
       </summary>
       <div class="agent-insight-content">
         {f'<p class="agent-rag-note">{esc(note)}</p>' if note else ""}
         {f'<div class="agent-rag-grid">{"".join(card_rows)}</div>' if card_rows else '<p class="muted">本轮没有可展示的证据卡。</p>'}
         <details class="agent-rag-debug">
-          <summary>RAG 调试</summary>
+          <summary>检索详情</summary>
           <dl>{debug_html}</dl>
         </details>
       </div>
@@ -1659,8 +1846,8 @@ def render_agent_pending_status(steps):
     phases = [
         ("classify_module", "理解问题"),
         ("load_user_context", "读取训练资料"),
-        ("retrieve_candidates", "筛选上下文"),
-        ("build_rag_context", "检索证据"),
+        ("retrieve_candidates", "筛选题目与记录"),
+        ("build_rag_context", "查找引用依据"),
         ("ChatOpenAI", "生成回复"),
     ]
     first_todo_seen = False
@@ -1693,12 +1880,12 @@ def render_agent_message_row(message, current_path, run_steps=None):
     run_link = (
         f"""
                 <div class="agent-message-actions">
-                  <a class="button small" href="/agent/runs/{message["run_id"]}">工具轨迹</a>
+                  <a class="button small" href="/agent/runs/{message["run_id"]}">执行详情</a>
                 </div>"""
         if message["run_id"]
         else ""
     )
-    role_label = "我" if message["role"] == "user" else "AI 教练"
+    role_label = "我" if message["role"] == "user" else "分析结果"
     time_label = "生成中" if is_pending else esc(format_beijing_time(message["created_at"]))
     body_html = (
         agent_response_html(message["content"], current_path)

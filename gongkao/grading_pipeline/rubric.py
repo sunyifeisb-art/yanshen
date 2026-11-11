@@ -236,8 +236,8 @@ def build_rubric_prompt(question, materials, references, consensus):
 规则：
 1. 只使用本题机构参考答案中存在的 reference_id。逐份检查全文并把支持当前采分点的 ID 写入 reference_ids；不得仅因本地聚类未聚合就把所有 reference_ids 留空。
 2. material_evidence.quote 必须是本题材料中的连续原文短句。
-3. core 至少由两个不同机构支持，且支持机构数达到机构总数的一半；否则降为 supporting。
-4. 只有一份机构答案时，可把材料直接确认的点标为 material_core，不得声称形成机构共识。
+3. core 至少由两个不同机构支持，且支持机构数达到机构总数的一半；未达阈值时，仅有材料直接确认且属于完成题目任务必需的点可改为 material_core，其余降为 supporting。
+4. 无论机构答案有几份，没有达到 core 的机构共识、但材料直接确认且完成题目任务不可缺少的点，可以标为 material_core；不得声称形成机构共识。
 5. 评分基准必须能在题目字数预算内完成。先提炼“为完成题目任务不可缺少的语义”，再把例子、修饰、展开说明和非任务要求的泛化成效放入 optional_details；不得要求考生机械写全所有机构答案细节。
 6. required_for_full_score 只用于在建议字数内仍应覆盖的 core/material_core。supporting、disputed 以及仅属补充说明的内容必须为 false，遗漏时不扣主要分。
 7. 合并同一措施或同一机制下的相近细节。所有 required 点的 minimum_expression 加上必要序号和标点，按上述占格规则估算后必须能放入 suggested_max，并保留至少8格安全余量。
@@ -246,7 +246,10 @@ def build_rubric_prompt(question, materials, references, consensus):
 10. 只要上面机构参考答案数量大于 0，就不得声称“无参考答案”或“未提供参考答案”；本地候选聚类只是辅助信息，不得替代对答案全文的核对。
 11. 综合写作不得把每一则具体材料案例都设为必答点。中心立意可以是 required；不同材料案例应作为同一 alternative_group 下的可替代论据；一般升华、科技手段等只能是 bonus。
 12. 每个计分点必须填写 suggested_weight 和 weight_reason；不要机械等权。若三个以上计分点确实等权，必须在顶层 equal_weight_reason 说明它们为何对完成题目任务同等重要。
-13. 不输出 Markdown、解释或用户答案。
+13. required_elements 只能是“机构答案里也能找到对应表述的语义成分”，不得把材料里的具体案例细节（专有名称、具体数字、个案情形、部门全称等）写成必答语义。判断办法：逐条把你写下的 required_elements 拿去和上面机构参考答案全文对照，若三家都没写该细节，它只能进 optional_details 或 aliases，不能进 required_elements。
+14. 机构参考答案普遍只写到上位概括时，required_elements 也必须停在同样的概括层级。例如三家都只写“比对数据、下发排查”，就不能把“与常住人口数据比对”“未参保居民”列为必答，只能写“比对数据并下发基层排查”。
+15. aliases 用来收纳同义、上位和下位表达，使考生写出其中任何一种都能判命中；不要把不同层级混进 required_elements 制造必然遗漏。
+16. 不输出 Markdown、解释或用户答案。
 """
 
 
@@ -339,6 +342,91 @@ def _stable_point_key(point):
 def _character_bigrams(value):
     text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", str(value or "").lower())
     return {text[index : index + 2] for index in range(max(0, len(text) - 1))}
+
+
+# required_elements 的合法层级：机构参考答案里找得到对应表述的语义成分才算。
+# 机构普遍只写上位概括时，把材料个案细节写成必答语义，会制造出「三家都没写的遗漏点」。
+_ELEMENT_BLOCK_SPLIT = re.compile(r"[、，,；;：:（）()“”\"'《》【】\[\] ]+")
+_ELEMENT_INNER_SPLIT = re.compile(r"的|了|等|或|与|和|及|并|以|从|到")
+
+
+def _element_blocks(element):
+    blocks = []
+    for part in _ELEMENT_BLOCK_SPLIT.split(str(element or "")):
+        for piece in _ELEMENT_INNER_SPLIT.split(part):
+            piece = piece.strip()
+            if piece:
+                blocks.append(piece)
+    return blocks
+
+
+def _element_block_supported(block, reference_bigrams, reference_text):
+    if len(block) <= 3:
+        # 过短虚词块没有区分度，不作为否决依据。
+        return True
+    if block in reference_text:
+        return True
+    grams = _character_bigrams(block)
+    if not grams:
+        return True
+    return len(grams & reference_bigrams) / len(grams) >= 0.7
+
+
+def _element_supported_by_references(element, reference_bigrams, reference_text):
+    blocks = _element_blocks(element)
+    if not blocks:
+        return True
+    supported = sum(1 for block in blocks if _element_block_supported(block, reference_bigrams, reference_text))
+    return supported / len(blocks) >= 0.6
+
+
+def _demote_unbacked_required_elements(points, references, material_contents):
+    """Drop required_elements that no selected reference answer expresses.
+
+    A rubric may legitimately rest on materials alone, but once an institution
+    answer set exists, requiring detail that every institution omitted makes
+    the miss unavoidable for any concise answer. Such elements move to
+    optional_details instead of silently becoming a scoring hole.
+    """
+    reference_text = " ".join(
+        str(reference.get(key) or "") for reference in references for key in ("answer_text", "scoring_points", "notes")
+    )
+    if not reference_text.strip():
+        return 0
+    reference_bigrams = _character_bigrams(reference_text)
+    material_blob = " ".join(str(value or "") for value in material_contents)
+    demoted_total = 0
+    for point in points:
+        elements = [str(value).strip() for value in (point.get("required_elements") or []) if str(value or "").strip()]
+        if not elements:
+            continue
+        kept = []
+        demoted = []
+        for element in elements:
+            if _element_supported_by_references(element, reference_bigrams, reference_text):
+                kept.append(element)
+            elif element in material_blob:
+                demoted.append(element)
+            else:
+                # 参考答answer 和材料都找不到的说法没有依据，直接丢弃。
+                demoted_total += 1
+                continue
+        if not demoted:
+            continue
+        demoted_total += len(demoted)
+        point["required_elements"] = kept
+        optional = [str(value).strip() for value in (point.get("optional_details") or []) if str(value or "").strip()]
+        for element in demoted:
+            if element not in optional:
+                optional.append(element)
+        point["optional_details"] = optional[:8]
+        point["demoted_required_elements"] = demoted
+        if not kept:
+            # 该点没有任何机构支持的必答语义，不能再要求满分覆盖。
+            point["required_for_full_score"] = False
+            point["coverage_role"] = "bonus"
+            point["score_role"] = "supplementary"
+    return demoted_total
 
 
 def _infer_reference_support_ids(candidate, evidence, references_by_id):
@@ -555,6 +643,12 @@ def validate_rubric(raw, question, materials, references, question_feedback=None
             points.append(point)
     if question.get("question_type") == "综合写作":
         normalize_essay_coverage_roles({"question_type": "综合写作", "points": points})
+    # 机构答案没写、只有材料里才有的细节不能当必答语义，否则考生按机构答案的抽象层级作答必然被判遗漏。
+    _demote_unbacked_required_elements(
+        points,
+        references,
+        [material.get("content") for material in materials],
+    )
     allowed_roles = (
         {"required", "alternative"}
         if question.get("question_type") == "综合写作"

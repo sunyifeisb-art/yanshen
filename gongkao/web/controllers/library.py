@@ -1,5 +1,6 @@
 """Question and paper library controllers."""
 
+from ...taxonomy import derive_question_title
 from ..runtime import (
     PAPER_WORK_STATUS_OPTIONS,
     QUESTION_WORK_STATUS_OPTIONS,
@@ -15,6 +16,7 @@ from ..runtime import (
     option_list,
     pagination_html,
     paper_attempt_duration_seconds,
+    paper_material_annotations,
     pre,
     progress_width,
     question_paper_duration_seconds,
@@ -37,6 +39,11 @@ from ..runtime import (
 )
 
 
+def display_question_title(row, limit=58):
+    """列表标题。历史数据里 title 可能仍是「第N题」，这里复用导入期的同一套兜底。"""
+    return derive_question_title(row["title"], row["prompt"], limit)
+
+
 class LibraryController:
     def page_index(self, query):
         page = requested_page(query)
@@ -45,7 +52,7 @@ class LibraryController:
             "exam_type": query.get("exam_type", [""])[0],
             "region": query.get("region", [""])[0],
             "question_type": query.get("question_type", [""])[0],
-            "year_from": query.get("year_from", ["2020"])[0],
+            "year_from": query.get("year_from", ["2015"])[0],
             "year_to": query.get("year_to", [""])[0],
             "organization": query.get("organization", [""])[0],
             "work_status": query.get("work_status", [""])[0],
@@ -180,7 +187,7 @@ class LibraryController:
         active_filter_count = sum(
             bool(filters[name])
             for name in ["exam_type", "region", "question_type", "year_to", "organization", "work_status", "sort_refs"]
-        ) + int(bool(filters["year_from"] and filters["year_from"] != "2020"))
+        ) + int(bool(filters["year_from"] and filters["year_from"] != "2015"))
         filter_panel_hidden = " hidden"
         filter_expanded = "false"
         filter_count_html = f'<span class="filter-count">{active_filter_count}</span>' if active_filter_count else ""
@@ -197,10 +204,10 @@ class LibraryController:
             )
             cards.append(f"""
             <article class="question-card card-shell" data-reference-count="{question["reference_count"]}">
-              <a class="card-main-link" href="{question_href}" aria-label="{esc(question["title"])}"></a>
+              <a class="card-main-link" href="{question_href}" aria-label="{esc(display_question_title(question, 200))}"></a>
               {favorite_button("questions", question["id"], question["is_favorite"], return_to, compact=True)}
               <div class="card-top"><span>{esc(question["year"])} · {esc(question["region"])}</span><b>{question["reference_count"]} 份机构答案</b></div>
-              <h2>{esc(question["title"])}</h2>
+              <h2>{esc(display_question_title(question))}</h2>
               <div class="paper-line">{esc(question["paper_name"] or "未归入试卷")} · {("第" + str(question["question_number"]) + "题") if question["question_number"] else "题号待校对"}</div>
               <p>{esc(question["prompt"])}</p>
               <div class="tags">
@@ -279,7 +286,7 @@ class LibraryController:
             "exam_type": query.get("exam_type", [""])[0],
             "region": query.get("region", [""])[0],
             "paper_category": query.get("paper_category", [""])[0],
-            "year_from": query.get("year_from", ["2020"])[0],
+            "year_from": query.get("year_from", ["2015"])[0],
             "year_to": query.get("year_to", [""])[0],
             "work_status": query.get("work_status", [""])[0],
             "q": query.get("q", [""])[0],
@@ -397,7 +404,7 @@ class LibraryController:
         active_filter_count = sum(
             bool(filters[name])
             for name in ["exam_type", "region", "paper_category", "work_status", "year_to", "sort_refs"]
-        ) + int(bool(filters["year_from"] and filters["year_from"] != "2020"))
+        ) + int(bool(filters["year_from"] and filters["year_from"] != "2015"))
         filter_panel_hidden = " hidden"
         filter_expanded = "false"
         filter_count_html = f'<span class="filter-count">{active_filter_count}</span>' if active_filter_count else ""
@@ -620,6 +627,86 @@ class LibraryController:
         """
         self.send_html(layout(f"{paper['paper_name']} - 研申", body, "papers"))
 
+    def export_question_pdf(self, path):
+        try:
+            question_id = int(path.removeprefix("/questions/").removesuffix("/export.pdf").strip("/"))
+        except ValueError:
+            self.send_error(404)
+            return
+        with connect(self.db_path) as conn:
+            question = conn.execute("SELECT * FROM questions WHERE id = ?", (question_id,)).fetchone()
+            if not question:
+                self.send_error(404)
+                return
+            materials = (
+                conn.execute(
+                    "SELECT * FROM paper_materials WHERE paper_id = ? ORDER BY material_number",
+                    (question["paper_id"],),
+                ).fetchall()
+                if question["paper_id"]
+                else []
+            )
+        from ...pdf_export import build_question_pdf, safe_pdf_filename
+
+        question_data = dict(question)
+        relevant_materials = [dict(row) for row in select_relevant_materials(question, materials)]
+        if not relevant_materials and str(question["materials"] or "").strip():
+            relevant_materials = [
+                {
+                    "material_number": 1,
+                    "title": "材料",
+                    "content": question["materials"],
+                }
+            ]
+        try:
+            payload = build_question_pdf(question_data, relevant_materials)
+        except RuntimeError:
+            self.send_error(500, "PDF export unavailable")
+            return
+        base = question["paper_name"] or question["title"] or "申论单题"
+        if question["question_number"]:
+            base = f"{base}-第{question['question_number']}题"
+        self.send_bytes(payload, safe_pdf_filename(base), "application/pdf")
+
+    def export_paper_pdf(self, path):
+        try:
+            paper_id = int(path.removeprefix("/papers/").removesuffix("/export.pdf").strip("/"))
+        except ValueError:
+            self.send_error(404)
+            return
+        with connect(self.db_path) as conn:
+            paper = conn.execute("SELECT * FROM papers WHERE id = ?", (paper_id,)).fetchone()
+            if not paper:
+                self.send_error(404)
+                return
+            materials = conn.execute(
+                "SELECT * FROM paper_materials WHERE paper_id = ? ORDER BY material_number",
+                (paper_id,),
+            ).fetchall()
+            questions = conn.execute(
+                "SELECT * FROM questions WHERE paper_id = ? ORDER BY question_number, id",
+                (paper_id,),
+            ).fetchall()
+        if not questions:
+            self.send_error(404, "Paper has no questions")
+            return
+        from ...pdf_export import build_paper_pdf, safe_pdf_filename
+
+        try:
+            payload = build_paper_pdf(
+                dict(paper),
+                [dict(row) for row in materials],
+                [dict(row) for row in questions],
+            )
+        except RuntimeError:
+            self.send_error(500, "PDF export unavailable")
+            return
+        self.send_bytes(
+            payload,
+            safe_pdf_filename(f"{paper['paper_name']}-整卷"),
+            "application/pdf",
+        )
+
     def page_question(self, path, query):
         try:
             question_id = int(path.strip("/").split("/")[1])
@@ -654,16 +741,7 @@ class LibraryController:
                 if question["paper_id"]
                 else []
             )
-            material_annotations = {
-                row["material_number"]: row
-                for row in conn.execute(
-                    """
-                    SELECT * FROM text_annotations
-                     WHERE target_type = 'material' AND question_id = ?
-                    """,
-                    (question_id,),
-                )
-            }
+            material_annotations = paper_material_annotations(conn, question["paper_id"])
             is_favorite = bool(
                 conn.execute("SELECT 1 FROM question_favorites WHERE question_id = ?", (question_id,)).fetchone()
             )
@@ -698,7 +776,7 @@ class LibraryController:
         materials_html = tabbed_materials(
             relevant_materials,
             f"question-{question_id}",
-            highlight_scope=f"question-{question_id}",
+            highlight_scope=f"paper-{question['paper_id']}",
             question_id=question_id,
             saved_annotations=material_annotations,
         )
@@ -720,12 +798,28 @@ class LibraryController:
         question_href = f"/questions/{question['id']}"
         more_html = favorite_button("questions", question_id, is_favorite, question_href)
         more_html += f'<a href="/questions/{question_id}/package.md">下载空白批改包</a>'
+        paper_pdf_export = (
+            f'<a class="button ghost small" href="/papers/{question["paper_id"]}/export.pdf" download '
+            'data-native-download data-download-label="整卷 PDF">导出整卷 PDF</a>'
+            if question["paper_id"]
+            else ""
+        )
+        pdf_export_actions = (
+            '<div class="question-export-actions" aria-label="导出试题">'
+            f'<a class="button ghost small" href="/questions/{question_id}/export.pdf" download '
+            'data-native-download data-download-label="本题 PDF">导出本题 PDF</a>'
+            f'{paper_pdf_export}'
+            '</div>'
+        )
         body = f"""
         {workflow_header("answer", question, question=question, attempt=attempts[0] if attempts else None, more_html=more_html, context_return=context_return)}
         <section class="answer-workspace" data-resizable-attempt-pane data-resize-storage-key="gongkao.attemptPaneWidth" data-default-side-width="500" data-min-main-width="340" data-min-side-width="320">
           <article class="answer-reading">
             <section class="question-brief">
-              <div class="question-brief-meta"><span>{esc(question["question_type"])}</span><span>{esc(question["word_limit"] or "字数未标注")}</span></div>
+              <div class="question-brief-top">
+                <div class="question-brief-meta"><span>{esc(question["question_type"])}</span><span>{esc(question["word_limit"] or "字数未标注")}</span></div>
+                {pdf_export_actions}
+              </div>
               <div class="preline prompt-strong">{pre(question["prompt"])}</div>
               <div class="question-requirements"><strong>作答要求</strong><div class="preline">{pre(question["requirements"])}</div></div>
             </section>
@@ -760,9 +854,10 @@ class LibraryController:
                 </div>
                 <textarea name="answer_text" data-answer-hidden hidden></textarea>
                 <input type="hidden" name="answer_format_json" value="[]" data-answer-format-hidden>
-                <div id="question-answer-input" class="direct-text-editor answer-compose-editor" contenteditable="true" role="textbox" aria-label="我的答案" spellcheck="false" data-answer-input data-empty-text="从材料中提炼要点，在这里完成本次作答……"></div>
+                <div class="answer-grid-scroll"><div id="question-answer-input" class="direct-text-editor answer-compose-editor" contenteditable="true" role="textbox" aria-label="我的答案" spellcheck="false" data-answer-input data-empty-text="从材料中提炼要点，在这里完成本次作答……"></div></div>
               </div>
               <div class="answer-counter" aria-live="polite"><span>当前 <strong data-word-count>0</strong> 字</span><span data-line-status>行数：0</span><span data-current-line-status>本行：0/25格</span><span data-word-status>开始作答后实时统计</span><span data-autosave-status>草稿自动保存开启</span></div>
+              <button type="button" class="button ghost answer-save" data-answer-save>保存答案</button>
               <button class="button primary answer-submit" type="submit">提交作答并进入批改</button>
             </form>
           </aside>
@@ -860,10 +955,10 @@ class LibraryController:
                 )
                 cards.append(f"""
                 <article class="question-card card-shell">
-                  <a class="card-main-link" href="{question_href}" aria-label="{esc(question["title"])}"></a>
+                  <a class="card-main-link" href="{question_href}" aria-label="{esc(display_question_title(question, 200))}"></a>
                   {favorite_button("questions", question["id"], True, self.path, compact=True)}
                   <div class="card-top"><span>{question["year"]} · {esc(question["region"])}</span><b>{question["reference_count"]} 答案</b></div>
-                  <h2>{esc(question["title"])}</h2>
+                  <h2>{esc(display_question_title(question))}</h2>
                   <div class="paper-line">{esc(question["paper_name"])} · 第{question["question_number"] or "?"}题</div>
                   <p>{esc(question["prompt"])}</p>
                   <div class="tags"><span>{esc(question["question_type"])}</span><span class="work-status {status_class}">{status}</span></div>

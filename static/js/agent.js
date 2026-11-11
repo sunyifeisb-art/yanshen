@@ -4,8 +4,8 @@ export function initializeAgent(signal, navigatePartial) {
   const phases = [
     ["classify_module", "理解问题"],
     ["load_user_context", "读取训练资料"],
-    ["retrieve_candidates", "筛选上下文"],
-    ["build_rag_context", "检索证据"],
+    ["retrieve_candidates", "筛选题目与记录"],
+    ["build_rag_context", "查找引用依据"],
     ["ChatOpenAI", "生成回复"],
   ];
   const renderStatusSteps = (steps) => {
@@ -27,7 +27,7 @@ export function initializeAgent(signal, navigatePartial) {
 
   const agentStream = document.querySelector(".agent-message-stream");
   if (agentStream) {
-    agentStream.scrollTop = agentStream.scrollHeight;
+    agentStream.scrollTop = document.querySelector(".agent-command-center") ? 0 : agentStream.scrollHeight;
   }
 
   const unlockComposer = () => {
@@ -45,7 +45,7 @@ export function initializeAgent(signal, navigatePartial) {
       }
       const footerNote = form.querySelector(".agent-composer-footer .muted");
       if (footerNote) {
-        footerNote.textContent = "上下文会保留在当前线程中";
+        footerNote.textContent = "保留本次对话的题型与筛选条件";
       }
     });
   };
@@ -151,13 +151,13 @@ export function initializeAgent(signal, navigatePartial) {
             <div class="report-body">${paragraphHtml(message)}</div>
           </article>
           <article class="agent-message assistant is-pending" data-agent-pending="1">
-            <header><strong>AI 教练</strong><span>响应中</span></header>
+            <header><strong>分析结果</strong><span>分析中</span></header>
             <div class="report-body">
-              <p>正在读取训练上下文并生成回复。</p>
+              <p>正在读取作答、批改和相关资料。</p>
             </div>
-            <div class="agent-status-note">后台任务已提交，正在读取真实执行步骤。</div>
-            <div class="agent-status-steps" aria-label="真实生成进度">${renderStatusSteps([])}</div>
-            <div class="agent-thinking-dots" aria-label="响应中"><span></span><span></span><span></span></div>
+            <div class="agent-status-note">已开始分析，正在读取训练记录。</div>
+            <div class="agent-status-steps" aria-label="分析进度">${renderStatusSteps([])}</div>
+            <div class="agent-thinking-dots" aria-label="分析中"><span></span><span></span><span></span></div>
           </article>
         `);
         stream.scrollTop = stream.scrollHeight;
@@ -165,10 +165,10 @@ export function initializeAgent(signal, navigatePartial) {
       textarea.readOnly = true;
       if (submitButton) {
         submitButton.disabled = true;
-        submitButton.textContent = "响应中...";
+        submitButton.textContent = "分析中...";
       }
       if (footerNote) {
-        footerNote.textContent = "正在生成回复，请稍等";
+        footerNote.textContent = "正在分析，请稍等";
       }
     });
   });

@@ -60,6 +60,8 @@ def build_training_statistics(conn, now=None):
         """
         SELECT gr.*
           FROM grading_reports gr
+          JOIN attempts scored_attempt ON scored_attempt.id = gr.attempt_id
+          JOIN questions scored_question ON scored_question.id = scored_attempt.question_id
           JOIN (
                 SELECT candidate.attempt_id, MAX(candidate.id) AS latest_id
                   FROM grading_reports candidate
@@ -68,7 +70,8 @@ def build_training_statistics(conn, now=None):
                  WHERE candidate.status = 'ok'
                    AND COALESCE(json_extract(context.result_json, '$.score_status'), 'valid') = 'valid'
               GROUP BY candidate.attempt_id
-          ) latest ON latest.latest_id = gr.id
+        ) latest ON latest.latest_id = gr.id
+         WHERE scored_question.question_type != '综合写作'
         """
     ).fetchall()
     report_counts = {
@@ -182,6 +185,7 @@ def build_module_score_statistics(conn, score_mode="first"):
               GROUP BY candidate.attempt_id
           ) latest ON latest.attempt_id = a.id
           JOIN grading_reports gr ON gr.id = latest.latest_id
+         WHERE q.question_type != '综合写作'
       ORDER BY a.created_at, a.id
         """
     ).fetchall()

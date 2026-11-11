@@ -1,0 +1,870 @@
+.idiom-page {
+  --idiom-ink: #252b29;
+  --idiom-muted: #716b65;
+  --idiom-border: rgba(50, 45, 40, .11);
+  --idiom-soft: #f7f6f2;
+  --idiom-green-soft: #edf4f1;
+  max-width: 1480px;
+  margin: 0 auto;
+  color: var(--idiom-ink);
+}
+
+.idiom-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 32px;
+  align-items: end;
+  padding: 18px 4px 30px;
+  border-bottom: 1px solid var(--idiom-border);
+}
+
+.idiom-hero-copy { max-width: 760px; }
+.idiom-hero h1 { font-size: clamp(34px, 4vw, 52px); letter-spacing: -1.4px; }
+.idiom-hero-copy > p:last-child {
+  max-width: 690px;
+  margin: 12px 0 0;
+  color: var(--idiom-muted);
+  font-size: 16px;
+  line-height: 1.75;
+}
+
+.idiom-hero-actions {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.idiom-hero-actions > div { display: flex; gap: 8px; align-items: center; }
+
+.idiom-hero-actions > span { color: var(--idiom-muted); font-size: 12px; }
+
+.idiom-overview {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 28px 0;
+  border: 1px solid var(--idiom-border);
+  border-radius: 14px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.idiom-overview article {
+  min-width: 0;
+  padding: 19px 22px;
+  border-right: 1px solid var(--idiom-border);
+}
+
+.idiom-overview article:last-child { border-right: 0; }
+.idiom-overview span,
+.idiom-overview small { display: block; color: var(--idiom-muted); font-size: 12px; }
+.idiom-overview strong {
+  display: block;
+  margin: 3px 0;
+  color: #315f54;
+  font-size: 27px;
+  letter-spacing: -.5px;
+}
+
+.idiom-workbench {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.idiom-control-panel {
+  position: sticky;
+  top: 24px;
+  display: grid;
+  gap: 20px;
+  padding: 18px;
+  border: 1px solid var(--idiom-border);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.idiom-control-heading h2,
+.idiom-content-head h2 { margin-bottom: 4px; font-size: 22px; }
+
+.idiom-view-switch { display: grid; gap: 5px; }
+.idiom-view-switch button,
+.idiom-quiz-kind-grid button {
+  appearance: none;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--idiom-ink);
+  cursor: pointer;
+  text-align: left;
+}
+
+.idiom-view-switch button {
+  display: grid;
+  gap: 2px;
+  padding: 10px 11px;
+}
+
+.idiom-view-switch button:hover { background: var(--idiom-soft); }
+.idiom-view-switch button.is-active { background: var(--idiom-green-soft); color: #28594e; }
+.idiom-view-switch strong { font-size: 14px; }
+.idiom-view-switch span { color: var(--idiom-muted); font-size: 11px; }
+.idiom-view-switch .is-active span { color: #5f7971; }
+
+.idiom-filter-form { display: grid; gap: 11px; }
+.idiom-filter-form label { display: grid; gap: 5px; }
+.idiom-filter-form label > span { color: var(--idiom-muted); font-size: 11px; font-weight: 700; }
+.idiom-filter-form input,
+.idiom-filter-form select,
+.idiom-quiz-start-row select {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--idiom-border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--idiom-ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.idiom-filter-actions { display: flex; gap: 7px; }
+.idiom-filter-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -4px; }
+.idiom-filter-chips button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--idiom-border);
+  border-radius: 999px;
+  background: #fff;
+  color: #5f635f;
+  cursor: pointer;
+  font-size: 10px;
+}
+.idiom-filter-chips button:hover { background: var(--idiom-soft); }
+.idiom-filter-chips span { color: #918a82; }
+.idiom-filter-chips b { font-size: 12px; font-weight: 500; }
+.idiom-study-tip {
+  padding: 13px;
+  border-radius: 10px;
+  background: var(--idiom-soft);
+}
+.idiom-study-tip > span,
+.idiom-study-tip > strong { display: block; }
+.idiom-study-tip > span { color: var(--idiom-muted); font-size: 10px; font-weight: 700; }
+.idiom-study-tip > strong { margin-top: 4px; font-size: 13px; }
+.idiom-study-tip p { margin: 7px 0 0; color: var(--idiom-muted); font-size: 11px; line-height: 1.55; }
+
+.idiom-review-launch {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 13px;
+  border: 1px solid rgba(47, 111, 94, .15);
+  border-radius: 10px;
+  background: #f7faf8;
+  color: var(--idiom-ink);
+  cursor: pointer;
+  text-align: left;
+}
+.idiom-review-launch:hover { border-color: rgba(47, 111, 94, .26); background: #eef6f2; }
+.idiom-review-launch span { color: #688079; font-size: 9px; font-weight: 700; letter-spacing: .08em; }
+.idiom-review-launch strong { font-size: 13px; }
+.idiom-review-launch small { color: var(--idiom-muted); font-size: 10px; line-height: 1.45; }
+
+.idiom-content-panel {
+  min-width: 0;
+  min-height: 640px;
+  padding: 22px;
+  border: 1px solid var(--idiom-border);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.idiom-content-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+  padding-bottom: 17px;
+  border-bottom: 1px solid var(--idiom-border);
+}
+
+.idiom-content-head > div > p:last-child {
+  max-width: 700px;
+  margin: 3px 0 0;
+  color: var(--idiom-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.idiom-result-count {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: var(--idiom-soft);
+  color: var(--idiom-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.idiom-list { margin-top: 18px; }
+.idiom-entry-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.idiom-entry-card {
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  min-width: 0;
+  min-height: 292px;
+  padding: 18px;
+  border: 1px solid var(--idiom-border);
+  border-radius: 12px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
+}
+
+.idiom-entry-card:hover {
+  border-color: rgba(47, 111, 94, .24);
+  box-shadow: 0 7px 22px rgba(45, 42, 38, .045);
+  transform: translateY(-1px);
+}
+
+.idiom-entry-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.idiom-entry-kicker { display: flex; gap: 6px; align-items: center; color: var(--idiom-muted); font-size: 10px; }
+.idiom-entry-kicker i { font-style: normal; }
+.idiom-entry-kicker i::before { content: "·"; margin-right: 6px; }
+.idiom-entry-head h3 { margin: 7px 0 0; font-size: 24px; letter-spacing: -.5px; }
+.idiom-star-button,
+.idiom-icon-button {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.idiom-star-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: #b8b2aa;
+  font-size: 18px;
+}
+
+.idiom-star-button:hover { background: var(--idiom-soft); color: #8b7965; }
+.idiom-star-button.is-starred { color: #9c6b27; background: #fbf4e8; }
+.idiom-entry-copy { align-self: start; min-width: 0; }
+.idiom-definition {
+  display: -webkit-box;
+  margin: 16px 0 0;
+  overflow: hidden;
+  color: #414844;
+  font-size: 13px;
+  line-height: 1.72;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.idiom-source-shortcut {
+  display: -webkit-box;
+  margin: 10px 0 0;
+  overflow: hidden;
+  color: #777069;
+  font-size: 11px;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.idiom-source-shortcut span {
+  display: inline-flex;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #f2f0ec;
+  color: #746b61;
+  font-size: 9px;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+.idiom-entry-open-hint {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin: 15px 0 12px;
+  padding: 9px 11px;
+  border: 1px solid rgba(47, 111, 94, .12);
+  border-radius: 8px;
+  background: #f7faf8;
+  color: #456b60;
+  font-size: 11px;
+  font-weight: 700;
+  transition: background .16s ease, border-color .16s ease, color .16s ease;
+}
+.idiom-entry-open-hint b { font-size: 13px; font-weight: 500; }
+.idiom-review-reason {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 13px;
+  color: #6e655a;
+  font-size: 10px;
+}
+.idiom-review-reason span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #f5eee3;
+  color: #866942;
+  font-size: 9px;
+  font-weight: 700;
+}
+.idiom-review-reason strong { font-size: 10px; font-weight: 650; }
+.idiom-entry-card:hover .idiom-entry-open-hint,
+.idiom-entry-card:focus-visible .idiom-entry-open-hint {
+  border-color: rgba(47, 111, 94, .24);
+  background: #eef6f2;
+  color: #315f54;
+}
+.idiom-entry-footer { display: flex; justify-content: space-between; gap: 12px; align-items: flex-end; padding-top: 13px; border-top: 1px solid var(--idiom-border); }
+.idiom-entry-progress { display: grid; justify-items: start; gap: 5px; }
+.idiom-entry-progress small { color: var(--idiom-muted); font-size: 10px; }
+.idiom-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+.idiom-status.unseen { background: #f1efec; color: #777069; }
+.idiom-status.learning { background: #f8f0df; color: #856328; }
+.idiom-status.mastered { background: #e8f3ef; color: #2d6759; }
+.idiom-state-actions { display: flex; gap: 4px; }
+.idiom-state-actions button {
+  min-height: 29px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: #f3f5f4;
+  color: #68716d;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+}
+.idiom-state-actions button:hover,
+.idiom-state-actions button.is-active { background: #e5efeb; color: #2c6256; }
+
+.idiom-contrast-list { display: grid; gap: 14px; }
+.idiom-contrast-group {
+  overflow: hidden;
+  border: 1px solid var(--idiom-border);
+  border-radius: 13px;
+  background: #fff;
+}
+.idiom-contrast-group > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding: 16px 18px;
+  cursor: pointer;
+  list-style: none;
+  background: #fbfbf9;
+}
+.idiom-contrast-group > summary::-webkit-details-marker { display: none; }
+.idiom-contrast-summary-title > span,
+.idiom-contrast-summary-meta small { color: var(--idiom-muted); font-size: 10px; }
+.idiom-contrast-summary-title h3 { margin: 3px 0 0; font-size: 19px; letter-spacing: -.2px; }
+.idiom-contrast-summary-meta { display: flex; align-items: center; gap: 9px; }
+.idiom-contrast-summary-meta b { color: #918b84; font-size: 15px; font-weight: 500; transition: transform .16s ease; }
+.idiom-contrast-group[open] .idiom-contrast-summary-meta b { transform: rotate(180deg); }
+.idiom-contrast-overview {
+  display: grid;
+  grid-template-columns: 1.35fr .65fr;
+  gap: 1px;
+  border-top: 1px solid var(--idiom-border);
+  border-bottom: 1px solid var(--idiom-border);
+  background: var(--idiom-border);
+}
+.idiom-contrast-overview > div { padding: 13px 16px; background: #fff; }
+.idiom-contrast-overview span,
+.idiom-contrast-quick > span,
+.idiom-contrast-example > span { color: #938d86; font-size: 9px; font-weight: 700; letter-spacing: .04em; }
+.idiom-contrast-overview p { margin: 5px 0 0; color: #515853; font-size: 12px; line-height: 1.65; }
+.idiom-contrast-quick { padding: 13px 16px 14px; border-bottom: 1px solid var(--idiom-border); background: #f8faf8; }
+.idiom-contrast-quick > div { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 7px; }
+.idiom-contrast-quick > div > span {
+  display: inline-flex;
+  gap: 5px;
+  align-items: baseline;
+  max-width: 100%;
+  padding: 5px 8px;
+  border: 1px solid rgba(47, 111, 94, .1);
+  border-radius: 999px;
+  background: #fff;
+  color: #626962;
+  font-size: 10px;
+  line-height: 1.4;
+}
+.idiom-contrast-quick strong { color: #315f54; font-size: 10px; white-space: nowrap; }
+.idiom-contrast-entries { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.idiom-contrast-entries section { min-width: 0; padding: 16px; border-right: 1px solid var(--idiom-border); border-bottom: 1px solid var(--idiom-border); background: #fff; }
+.idiom-contrast-entries section:nth-child(2n) { border-right: 0; }
+.idiom-contrast-entries section:nth-last-child(-n + 2) { border-bottom: 0; }
+.idiom-contrast-entry { cursor: pointer; transition: background .16s ease; }
+.idiom-contrast-entry:hover,
+.idiom-contrast-entry:focus-visible { background: #fafcfb; }
+.idiom-contrast-term { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.idiom-contrast-term > div { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.idiom-contrast-term strong { font-size: 18px; }
+.idiom-contrast-tone { padding: 2px 6px; border-radius: 999px; background: #f2f0ec; color: #746d65; font-size: 9px; font-weight: 700; }
+.idiom-contrast-block { margin-top: 11px; }
+.idiom-contrast-block > span { color: #97918a; font-size: 9px; font-weight: 700; letter-spacing: .04em; }
+.idiom-contrast-block p { margin: 4px 0 0; color: #555653; font-size: 12px; line-height: 1.65; }
+.idiom-contrast-block.is-focus {
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f2f7f5;
+}
+.idiom-contrast-block.is-focus > span { color: #5d776e; }
+.idiom-contrast-block.is-warning { padding: 9px 10px; border-radius: 8px; background: #faf7f1; }
+.idiom-contrast-block.is-warning > span { color: #8b7554; }
+.idiom-contrast-example { margin-top: 11px; padding-top: 10px; border-top: 1px dashed rgba(50, 45, 40, .12); }
+.idiom-contrast-example p { margin: 4px 0 0; color: #666b66; font-size: 11px; line-height: 1.6; }
+.idiom-contrast-open { display: flex; justify-content: space-between; gap: 8px; margin-top: 13px; color: #4b6f65; font-size: 10px; font-weight: 700; }
+.idiom-contrast-open b { font-weight: 500; }
+
+.idiom-misuse-list { display: grid; gap: 8px; }
+.idiom-misuse-card { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 18px; align-items: start; padding: 15px 4px; border-bottom: 1px solid var(--idiom-border); }
+.idiom-misuse-card:last-child { border-bottom: 0; }
+.idiom-misuse-card > div { display: grid; grid-template-columns: 25px minmax(0, 1fr); gap: 7px; align-items: baseline; }
+.idiom-misuse-card > div > span { color: #aaa39a; font-size: 10px; font-weight: 700; }
+.idiom-misuse-card h3 { margin: 0; font-size: 16px; }
+.idiom-misuse-card p { margin: 0; color: #555653; font-size: 13px; line-height: 1.7; }
+
+.idiom-loading,
+.idiom-error,
+.idiom-empty {
+  min-height: 360px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  color: var(--idiom-muted);
+  text-align: center;
+}
+.idiom-loading i { width: 20px; height: 20px; border: 2px solid #dce4e1; border-top-color: #47766a; border-radius: 50%; animation: idiom-spin .75s linear infinite; }
+.idiom-error strong,
+.idiom-empty strong { color: var(--idiom-ink); font-size: 17px; }
+.idiom-error p,
+.idiom-empty p { max-width: 480px; margin: 0 0 8px; font-size: 12px; line-height: 1.6; }
+.idiom-pagination { display: flex; justify-content: center; align-items: center; gap: 12px; padding-top: 18px; }
+.idiom-pagination span { color: var(--idiom-muted); font-size: 11px; }
+
+.idiom-modal-open { overflow: hidden; }
+.idiom-detail-layer,
+.idiom-quiz-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(35, 38, 37, .3);
+  backdrop-filter: blur(5px);
+}
+.idiom-detail-layer { z-index: 82; }
+.idiom-detail-dialog {
+  width: min(820px, 100%);
+  max-height: min(860px, calc(100vh - 48px));
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, .58);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 28px 80px rgba(28, 33, 31, .18);
+}
+.idiom-detail-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 20px 22px 15px;
+  border-bottom: 1px solid var(--idiom-border);
+  background: rgba(255, 255, 255, .96);
+  backdrop-filter: blur(12px);
+}
+.idiom-detail-head h2 { margin: 2px 0 0; font-size: 19px; letter-spacing: -.25px; }
+.idiom-detail-body { padding: 22px; }
+.idiom-detail-card { display: grid; gap: 18px; }
+.idiom-detail-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  align-items: flex-start;
+  padding: 4px 2px 18px;
+  border-bottom: 1px solid var(--idiom-border);
+}
+.idiom-detail-hero h3 { margin: 8px 0 5px; font-size: clamp(34px, 5vw, 48px); letter-spacing: -1.2px; line-height: 1.08; }
+.idiom-detail-hero > div > p { margin: 0; color: var(--idiom-muted); font-size: 11px; }
+.idiom-detail-hero > div > .idiom-detail-pinyin {
+  margin: 7px 0 5px;
+  color: #52655f;
+  font-size: 12px;
+  letter-spacing: .02em;
+}
+.idiom-detail-statuses { display: grid; justify-items: end; gap: 7px; }
+.idiom-detail-statuses > span:last-child { color: var(--idiom-muted); font-size: 10px; }
+.idiom-detail-definition,
+.idiom-detail-note-card,
+.idiom-detail-related {
+  border: 1px solid var(--idiom-border);
+  border-radius: 12px;
+  background: #fff;
+}
+.idiom-detail-definition { padding: 18px; background: var(--idiom-soft); }
+.idiom-detail-definition-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.idiom-detail-definition-head button {
+  padding: 4px 7px;
+  border: 1px solid var(--idiom-border);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--idiom-muted);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+}
+.idiom-detail-definition-head button:hover { background: #f3f5f4; color: #456b60; }
+.idiom-detail-definition > span,
+.idiom-detail-note-card > span,
+.idiom-detail-section-head span {
+  color: var(--idiom-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+.idiom-detail-definition p { margin: 8px 0 0; color: #3f4642; font-size: 16px; line-height: 1.85; }
+.idiom-detail-note-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.idiom-detail-note-card { padding: 15px; }
+.idiom-detail-note-card p { margin: 8px 0 0; color: #505652; font-size: 12px; line-height: 1.7; }
+.idiom-detail-related { overflow: hidden; }
+.idiom-detail-section-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-end;
+  padding: 15px 16px 12px;
+  border-bottom: 1px solid var(--idiom-border);
+}
+.idiom-detail-section-head > div { display: grid; gap: 3px; }
+.idiom-detail-section-head strong { font-size: 14px; }
+.idiom-detail-section-head small { color: var(--idiom-muted); font-size: 10px; }
+.idiom-detail-related-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.idiom-detail-related-item {
+  appearance: none;
+  min-width: 0;
+  padding: 13px 15px;
+  border: 0;
+  border-right: 1px solid var(--idiom-border);
+  border-bottom: 1px solid var(--idiom-border);
+  background: #fff;
+  color: var(--idiom-ink);
+  cursor: pointer;
+  text-align: left;
+}
+.idiom-detail-related-item:nth-child(2n) { border-right: 0; }
+.idiom-detail-related-item:hover { background: #fafcfb; }
+.idiom-detail-related-item > span { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.idiom-detail-related-item strong { font-size: 15px; }
+.idiom-detail-related-item small { color: var(--idiom-muted); font-size: 9px; }
+.idiom-detail-related-item p {
+  display: -webkit-box;
+  margin: 6px 0 0;
+  overflow: hidden;
+  color: #626761;
+  font-size: 11px;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.idiom-detail-related-state { grid-column: 1 / -1; padding: 18px; color: var(--idiom-muted); font-size: 11px; text-align: center; }
+.idiom-detail-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding-top: 2px;
+}
+.idiom-detail-nav { display: flex; gap: 6px; }
+.idiom-detail-nav button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--idiom-border);
+  border-radius: 8px;
+  background: #fff;
+  color: #68716d;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+}
+.idiom-detail-nav button:hover:not(:disabled) { background: var(--idiom-soft); color: #315f54; }
+.idiom-detail-nav button:disabled { cursor: default; opacity: .38; }
+.idiom-detail-learning-actions,
+.idiom-detail-primary-actions { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+.idiom-detail-learning-actions button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--idiom-border);
+  border-radius: 8px;
+  background: #fff;
+  color: #68716d;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+.idiom-detail-learning-actions button:hover,
+.idiom-detail-learning-actions button.is-active { border-color: rgba(47, 111, 94, .23); background: #eaf2ef; color: #2c6256; }
+.idiom-detail-learning-actions .idiom-detail-star.is-starred { border-color: rgba(156, 107, 39, .16); background: #fbf4e8; color: #946620; }
+.idiom-flashcard-layer,
+.idiom-quiz-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(35, 38, 37, .3);
+  backdrop-filter: blur(5px);
+}
+
+.idiom-flashcard-layer { z-index: 84; }
+.idiom-flashcard-dialog {
+  width: min(720px, 100%);
+  max-height: min(860px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid rgba(255, 255, 255, .5);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 28px 80px rgba(28, 33, 31, .18);
+}
+.idiom-flashcard-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding-bottom: 17px; border-bottom: 1px solid var(--idiom-border); }
+.idiom-flashcard-head h2 { margin-bottom: 4px; font-size: 23px; }
+.idiom-flashcard-head p:last-child { margin: 0; color: var(--idiom-muted); font-size: 11px; }
+.idiom-flashcard-progress { padding: 16px 0 13px; color: var(--idiom-muted); font-size: 10px; font-weight: 650; }
+.idiom-flashcard-progress > i { display: block; height: 4px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: #eceeec; }
+.idiom-flashcard-progress > i > b { display: block; width: 0; height: 100%; border-radius: inherit; background: #49776b; transition: width .22s ease; }
+.idiom-flashcard-stage { min-height: 390px; perspective: 1100px; }
+.idiom-flashcard-card {
+  position: relative;
+  width: 100%;
+  min-height: 390px;
+  padding: 0;
+  border: 1px solid var(--idiom-border);
+  border-radius: 16px;
+  background: #fff;
+  cursor: pointer;
+  transform-style: preserve-3d;
+  transition: transform .4s ease, box-shadow .18s ease;
+}
+.idiom-flashcard-card:hover { box-shadow: 0 12px 34px rgba(28, 33, 31, .08); }
+.idiom-flashcard-card.is-flipped { transform: rotateY(180deg); }
+.idiom-flashcard-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 38px 54px;
+  backface-visibility: hidden;
+  text-align: center;
+}
+.idiom-flashcard-face small { color: var(--idiom-muted); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.idiom-flashcard-face > strong { margin-top: 14px; font-size: clamp(40px, 7vw, 62px); letter-spacing: -1.5px; }
+.idiom-flashcard-face em { margin-top: 10px; color: #65736e; font-size: 13px; font-style: normal; }
+.idiom-flashcard-face i { margin-top: 28px; color: #9a948d; font-size: 10px; font-style: normal; }
+.idiom-flashcard-back { transform: rotateY(180deg); }
+.idiom-flashcard-back > strong { font-size: 28px; }
+.idiom-flashcard-back p { max-width: 540px; margin: 18px 0 0; color: #414844; font-size: 17px; line-height: 1.85; }
+.idiom-flashcard-back blockquote { max-width: 520px; margin: 15px 0 0; padding: 10px 14px; border: 0; border-radius: 9px; background: var(--idiom-soft); color: #6e6b66; font-size: 11px; line-height: 1.65; }
+.idiom-flashcard-empty { min-height: 390px; display: grid; place-items: center; align-content: center; gap: 8px; color: var(--idiom-muted); text-align: center; }
+.idiom-flashcard-empty strong { color: var(--idiom-ink); font-size: 17px; }
+.idiom-flashcard-empty p { max-width: 430px; margin: 0; font-size: 11px; line-height: 1.6; }
+.idiom-flashcard-spinner { width: 22px; height: 22px; border: 2px solid #dce4e1; border-top-color: #47766a; border-radius: 50%; animation: idiom-spin .75s linear infinite; }
+.idiom-flashcard-controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; padding-top: 16px; }
+.idiom-flashcard-controls > div { display: flex; gap: 7px; justify-content: center; }
+.idiom-flashcard-controls > button:last-child { justify-self: end; }
+
+.idiom-quiz-dialog {
+  width: min(760px, 100%);
+  max-height: min(820px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid rgba(255, 255, 255, .5);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 25px 70px rgba(28, 33, 31, .18);
+}
+.idiom-quiz-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding-bottom: 18px; border-bottom: 1px solid var(--idiom-border); }
+.idiom-quiz-head h2 { margin-bottom: 4px; font-size: 23px; }
+.idiom-quiz-head p:last-child { margin: 0; color: var(--idiom-muted); font-size: 12px; }
+.idiom-icon-button { flex: 0 0 auto; width: 34px; height: 34px; border-radius: 9px; color: #746f69; font-size: 23px; }
+.idiom-icon-button:hover { background: var(--idiom-soft); }
+.idiom-quiz-setup { padding-top: 20px; }
+.idiom-quiz-kind-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.idiom-quiz-kind-grid button { display: grid; gap: 3px; padding: 15px; border: 1px solid var(--idiom-border); }
+.idiom-quiz-kind-grid button:hover { background: var(--idiom-soft); }
+.idiom-quiz-kind-grid button.is-active { border-color: rgba(47, 111, 94, .28); background: var(--idiom-green-soft); }
+.idiom-quiz-kind-grid strong { font-size: 14px; }
+.idiom-quiz-kind-grid span { color: var(--idiom-muted); font-size: 11px; }
+.idiom-quiz-start-row { display: grid; grid-template-columns: 120px auto; justify-content: end; align-items: end; gap: 10px; margin-top: 18px; }
+.idiom-quiz-start-row label { display: grid; gap: 5px; }
+.idiom-quiz-start-row label > span { color: var(--idiom-muted); font-size: 10px; font-weight: 700; }
+.idiom-quiz-setup-status { min-height: 18px; margin: 10px 0 0; color: #8b6730; font-size: 11px; text-align: right; }
+
+.idiom-quiz-play { padding-top: 20px; }
+.idiom-quiz-progress > div { display: flex; justify-content: space-between; align-items: center; color: var(--idiom-muted); font-size: 11px; }
+.idiom-quiz-progress > div strong { color: #315f54; }
+.idiom-quiz-progress > i { display: block; height: 4px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: #eceeec; }
+.idiom-quiz-progress > i > b { display: block; width: 0; height: 100%; border-radius: inherit; background: #49776b; transition: width .22s ease; }
+.idiom-quiz-question-card { padding-top: 24px; }
+.idiom-quiz-question-meta { display: flex; justify-content: space-between; gap: 10px; color: var(--idiom-muted); font-size: 10px; font-weight: 700; }
+.idiom-quiz-question-meta span { padding: 4px 7px; border-radius: 999px; background: var(--idiom-soft); }
+.idiom-quiz-question-card > h3 { margin: 15px 0 18px; font-size: 19px; line-height: 1.6; font-weight: 650; }
+.idiom-quiz-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.idiom-quiz-choices button {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-height: 54px;
+  padding: 10px 12px;
+  border: 1px solid var(--idiom-border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--idiom-ink);
+  cursor: pointer;
+  text-align: left;
+}
+.idiom-quiz-choices button:hover:not(:disabled) { border-color: rgba(47, 111, 94, .32); background: #fafcfb; }
+.idiom-quiz-choices button > span { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: #f1f3f2; color: #6d746f; font-size: 11px; }
+.idiom-quiz-choices button strong { font-size: 13px; font-weight: 650; line-height: 1.45; }
+.idiom-quiz-choices button.is-correct { border-color: rgba(47, 111, 94, .34); background: #edf6f2; }
+.idiom-quiz-choices button.is-correct > span { background: #dbece5; color: #285d50; }
+.idiom-quiz-choices button.is-wrong { border-color: rgba(158, 96, 76, .25); background: #fbf1ee; }
+.idiom-quiz-choices button.is-wrong > span { background: #f3dfd8; color: #985745; }
+.idiom-quiz-choices button:disabled { cursor: default; opacity: 1; }
+.idiom-quiz-feedback { margin-top: 15px; padding: 15px; border-radius: 11px; background: var(--idiom-soft); }
+.idiom-quiz-feedback > div { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.idiom-quiz-feedback > div strong { color: #315f54; font-size: 13px; }
+.idiom-quiz-feedback > div span { color: var(--idiom-muted); font-size: 10px; }
+.idiom-quiz-feedback p { margin: 9px 0 13px; color: #555653; font-size: 12px; line-height: 1.7; }
+.idiom-quiz-feedback .button { float: right; }
+.idiom-quiz-feedback::after { content: ""; display: block; clear: both; }
+.idiom-quiz-result { padding: 34px 5px 6px; text-align: center; }
+.idiom-quiz-result-score span,
+.idiom-quiz-result-score small { display: block; color: var(--idiom-muted); font-size: 11px; }
+.idiom-quiz-result-score strong { display: block; margin: 5px 0; color: #315f54; font-size: 48px; letter-spacing: -1px; }
+.idiom-quiz-result > p { max-width: 500px; margin: 16px auto; color: var(--idiom-muted); font-size: 13px; line-height: 1.65; }
+.idiom-quiz-wrong-review {
+  max-width: 600px;
+  margin: 18px auto;
+  overflow: hidden;
+  border: 1px solid var(--idiom-border);
+  border-radius: 12px;
+  text-align: left;
+}
+.idiom-quiz-wrong-review > div { display: flex; justify-content: space-between; gap: 12px; padding: 10px 13px; border-bottom: 1px solid var(--idiom-border); background: var(--idiom-soft); }
+.idiom-quiz-wrong-review > div span { color: var(--idiom-muted); font-size: 10px; }
+.idiom-quiz-wrong-review > div strong { font-size: 11px; }
+.idiom-quiz-wrong-review article { padding: 11px 13px; border-bottom: 1px solid var(--idiom-border); }
+.idiom-quiz-wrong-review article:last-child { border-bottom: 0; }
+.idiom-quiz-wrong-review article strong { font-size: 13px; }
+.idiom-quiz-wrong-review article p { margin: 4px 0 0; color: #666763; font-size: 10px; line-height: 1.6; }
+.idiom-quiz-result-actions { display: flex; justify-content: center; gap: 8px; }
+
+.idiom-view-switch button:focus-visible,
+.idiom-entry-card:focus-visible,
+.idiom-contrast-entry:focus-visible,
+  .idiom-detail-related-item:focus-visible,
+  .idiom-review-launch:focus-visible,
+  .idiom-filter-chips button:focus-visible,
+  .idiom-flashcard-card:focus-visible,
+  .idiom-flashcard-controls button:focus-visible,
+  .idiom-detail-nav button:focus-visible,
+  .idiom-detail-definition-head button:focus-visible,
+.idiom-detail-learning-actions button:focus-visible,
+.idiom-star-button:focus-visible,
+.idiom-state-actions button:focus-visible,
+.idiom-icon-button:focus-visible,
+.idiom-quiz-kind-grid button:focus-visible,
+.idiom-quiz-choices button:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 3px rgba(53, 105, 92, .13);
+}
+
+@keyframes idiom-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 1180px) {
+  .idiom-entry-list { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 980px) {
+  .idiom-workbench { grid-template-columns: 1fr; }
+  .idiom-control-panel { position: static; }
+  .idiom-view-switch { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .idiom-filter-form { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; }
+  .idiom-filter-actions { align-self: end; }
+}
+
+@media (max-width: 720px) {
+  .idiom-hero { grid-template-columns: 1fr; align-items: start; }
+  .idiom-hero-actions { justify-items: start; }
+  .idiom-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .idiom-overview article { border-bottom: 1px solid var(--idiom-border); }
+  .idiom-overview article:nth-child(2n) { border-right: 0; }
+  .idiom-overview article:last-child { grid-column: 1 / -1; border-bottom: 0; }
+  .idiom-view-switch,
+  .idiom-filter-form,
+  .idiom-quiz-kind-grid,
+  .idiom-quiz-choices { grid-template-columns: 1fr; }
+  .idiom-content-panel { padding: 16px; }
+  .idiom-entry-footer { align-items: flex-start; flex-direction: column; }
+  .idiom-misuse-card { grid-template-columns: 1fr; gap: 8px; }
+  .idiom-contrast-entries { grid-template-columns: 1fr; }
+  .idiom-contrast-entries section { border-right: 0; border-bottom: 1px solid var(--idiom-border); }
+  .idiom-contrast-entries section:last-child { border-bottom: 0; }
+  .idiom-detail-layer { padding: 10px; }
+  .idiom-detail-dialog { max-height: calc(100vh - 20px); }
+  .idiom-detail-body { padding: 16px; }
+  .idiom-detail-hero,
+  .idiom-detail-actions { align-items: flex-start; flex-direction: column; }
+  .idiom-detail-statuses { justify-items: start; }
+  .idiom-detail-note-grid,
+  .idiom-detail-related-list { grid-template-columns: 1fr; }
+  .idiom-detail-related-item { border-right: 0; }
+  .idiom-quiz-layer { padding: 10px; }
+  .idiom-flashcard-layer { padding: 10px; }
+  .idiom-flashcard-dialog { max-height: calc(100vh - 20px); padding: 16px; }
+  .idiom-flashcard-stage,
+  .idiom-flashcard-card,
+  .idiom-flashcard-empty { min-height: 340px; }
+  .idiom-flashcard-face { padding: 28px 22px; }
+  .idiom-flashcard-controls { grid-template-columns: 1fr 1fr; }
+  .idiom-flashcard-controls > div { grid-column: 1 / -1; grid-row: 1; }
+  .idiom-quiz-dialog { max-height: calc(100vh - 20px); padding: 18px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .idiom-entry-card,
+  .idiom-quiz-progress > i > b,
+  .idiom-flashcard-progress > i > b,
+  .idiom-flashcard-card { transition: none; }
+  .idiom-entry-card:hover { transform: none; }
+  .idiom-loading i { animation-duration: 1.6s; }
+}

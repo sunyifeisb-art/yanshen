@@ -46,7 +46,11 @@
           </nav>
           {% endif %}
         </div>
-        <a href="/agent" class="{{ 'active' if active == 'agent' else '' }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2zM18 14l.8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8z"></path></svg><span>AI 教练</span></a>
+        <a href="/mistakes" class="{{ 'active' if active == 'mistakes' else '' }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5z"></path><path d="M9 8h6M9 12h6M9 16h3M17 7v6"></path><path d="M17 16h.01"></path></svg><span>错题本</span></a>
+        <a href="/normative-expressions" class="{{ 'active' if active == 'normative_expressions' else '' }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5z"></path><path d="M8 8h8M8 12h5M8 16h8"></path><path d="m15 11 1.5 1.5L20 9"></path></svg><span>规范词整理</span></a>
+        <a href="/political-quiz" class="{{ 'active' if active == 'political_quiz' else '' }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6z"></path><path d="M9 8h6M9 12h6M9 16h4"></path><path d="m15.5 14.5 1.2 1.2 2.3-2.7"></path></svg><span>时政测验</span></a>
+        <a href="/idioms" class="{{ 'active' if active == 'idioms' else '' }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5h10a3 3 0 0 1 3 3v12H8a3 3 0 0 1-3-3z"></path><path d="M8 4.5v15M11 9h4M11 13h4"></path></svg><span>成语学习</span></a>
+        <a href="/agent" class="{{ 'active' if active == 'agent' else '' }}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2zM18 14l.8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8z"></path></svg><span>训练分析</span></a>
         {{ sidebar_extra }}
         <a href="/settings" class="nav-settings {{ 'active' if active == 'settings' else '' }}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a8 8 0 0 0-1.7-1L14.5 3h-5L9 6.1a8 8 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a8 8 0 0 0 1.7 1l.5 3.1h5l.5-3.1a8 8 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5a7 7 0 0 0 .1-1Z"></path></svg><span>设置</span></a>
       </nav>

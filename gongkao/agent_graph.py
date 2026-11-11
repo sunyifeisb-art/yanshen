@@ -4,6 +4,7 @@ import time
 from contextlib import ExitStack
 from typing import Any, Dict, TypedDict
 
+from . import workbuddy
 from .agent_modules import classify_module_heuristic
 from .agent_prompts import (
     AGENT_PROMPT_VERSION,
@@ -22,7 +23,7 @@ from .agent_tools import (
     load_user_context,
     retrieve_candidates,
 )
-from .ai import resolve_api_key
+from .ai import codex_auth_status, resolve_api_key
 from .ai_config import load_effective_agent_settings
 from .db import connect
 
@@ -129,6 +130,120 @@ def _structured_output(text):
     if {"summary", "weaknesses", "next_actions", "recommended_questions"} & set(parsed.keys()):
         return parsed
     return {}
+
+
+def _replace_structured_output(text, structured):
+    replacement = "```json\n" + json.dumps(structured, ensure_ascii=False, separators=(",", ":")) + "\n```"
+    matches = list(re.finditer(r"`{3,}json\s*(.*?)\s*`{3,}", text or "", flags=re.S | re.I))
+    if not matches:
+        return ((text or "").rstrip() + "\n\n" + replacement).strip()
+    match = matches[-1]
+    return (text[: match.start()] + replacement + text[match.end() :]).strip()
+
+
+def _ground_structured_output(structured, state):
+    if not isinstance(structured, dict):
+        return {}, {"removed_evidence_refs": 0, "removed_questions": 0}
+    rag_context = state.get("rag_context") or {}
+    allowed_evidence = set((rag_context.get("grounding_contract") or {}).get("allowed_evidence_ids") or [])
+    candidates = list(state.get("candidate_questions") or [])
+    candidate_by_id = {}
+    for candidate in candidates:
+        try:
+            candidate_id = int(candidate.get("id"))
+        except (TypeError, ValueError):
+            continue
+        candidate_by_id[candidate_id] = candidate
+
+    review_question_ids = set()
+    review_context = state.get("review_context") or {}
+    review_items = review_context.get("attempt_reviews") if review_context.get("mode") == "multi_attempt_review" else [review_context]
+    for item in review_items or []:
+        question = (item or {}).get("question") or {}
+        try:
+            review_question_ids.add(int(question.get("id")))
+        except (TypeError, ValueError):
+            pass
+    allowed_question_ids = set(candidate_by_id) | review_question_ids
+
+    removed_evidence_refs = 0
+    grounded_weaknesses = []
+    for item in list(structured.get("weaknesses") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        grounded_refs = []
+        for ref in item.get("evidence_refs") or []:
+            keep = False
+            if ref in allowed_evidence:
+                keep = True
+            else:
+                try:
+                    keep = int(ref) in allowed_question_ids
+                except (TypeError, ValueError):
+                    keep = False
+            if keep and ref not in grounded_refs:
+                grounded_refs.append(ref)
+            elif not keep:
+                removed_evidence_refs += 1
+        severity = item.get("severity") if item.get("severity") in {"high", "medium", "low"} else "medium"
+        grounded_weaknesses.append(
+            {
+                "name": str(item.get("name") or "短板")[:80],
+                "severity": severity,
+                "evidence_refs": grounded_refs[:6],
+                "reason": str(item.get("reason") or "")[:500],
+            }
+        )
+
+    grounded_actions = []
+    for item in list(structured.get("next_actions") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "").strip()
+        if not action:
+            continue
+        grounded_actions.append(
+            {
+                "action": action[:300],
+                "target": str(item.get("target") or "")[:160],
+                "timebox": str(item.get("timebox") or "")[:80],
+            }
+        )
+
+    removed_questions = 0
+    grounded_questions = []
+    seen_question_ids = set()
+    for item in list(structured.get("recommended_questions") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            question_id = int(item.get("question_id"))
+        except (TypeError, ValueError):
+            removed_questions += 1
+            continue
+        candidate = candidate_by_id.get(question_id)
+        if not candidate or question_id in seen_question_ids:
+            removed_questions += 1
+            continue
+        seen_question_ids.add(question_id)
+        grounded_questions.append(
+            {
+                "question_id": question_id,
+                "title": str(candidate.get("title") or candidate.get("question_code") or "推荐训练题")[:160],
+                "reason": str(item.get("reason") or "")[:400],
+            }
+        )
+    return {
+        "summary": str(structured.get("summary") or "")[:500],
+        "weaknesses": grounded_weaknesses,
+        "next_actions": grounded_actions,
+        "recommended_questions": grounded_questions,
+    }, {
+        "removed_evidence_refs": removed_evidence_refs,
+        "removed_questions": removed_questions,
+        "allowed_evidence_count": len(allowed_evidence),
+        "candidate_question_count": len(candidate_by_id),
+    }
 
 
 def _compact_concise_response(text, structured):
@@ -297,14 +412,60 @@ def _rerank_evidence_with_llm(llm, user_goal, rag_context, limit=20):
 
 def _graph_for(settings, db_path, stack=None):
     ChatOpenAI, StateGraph, START, END = _load_langgraph()
-    llm = ChatOpenAI(
-        model=settings["model"],
-        api_key=resolve_api_key(settings),
-        base_url=_normalize_base_url(settings["api_base_url"]),
-        temperature=float(settings["temperature"] or 0.2),
-        timeout=60,
-        max_retries=0,
-    )
+
+    if (settings or {}).get("mode") in {"chatgpt", "workbuddy"}:
+        # ChatGPT/Codex 账号模式：chatgpt.com 不提供 OpenAI 兼容接口（直接 POST 会
+        # 返回 403 HTML 页），因此与批改保持一致，改用本地 Codex CLI 复用 ChatGPT OAuth。
+        # WorkBuddy 账号模式：同样没有 API Key，改走插件账号池（workbuddy.chat_completion）。
+        from langchain_core.language_models.chat_models import BaseChatModel
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        def _messages_to_prompt(messages):
+            parts = []
+            for message in messages:
+                if isinstance(message, SystemMessage):
+                    parts.append(f"<system>\n{message.content}\n</system>")
+                elif isinstance(message, HumanMessage):
+                    parts.append(f"<user>\n{message.content}\n</user>")
+                elif isinstance(message, AIMessage):
+                    parts.append(f"<assistant>\n{message.content}\n</assistant>")
+                else:
+                    parts.append(f"<message>\n{message.content}\n</message>")
+            return "\n\n".join(parts)
+
+        class _CodexChatModel(BaseChatModel):
+            settings: dict
+
+            @property
+            def _llm_type(self):
+                return "codex-account"
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                from .ai import codex_chat_completion, workbuddy_chat_completion
+                prompt = _messages_to_prompt(messages)
+                if (self.settings or {}).get("mode") == "workbuddy":
+                    content, _ = workbuddy_chat_completion(
+                        self.settings, prompt, kwargs.get("request_options")
+                    )
+                else:
+                    content, _ = codex_chat_completion(
+                        self.settings, prompt, kwargs.get("request_options")
+                    )
+                return ChatResult(
+                    generations=[ChatGeneration(message=AIMessage(content=content))]
+                )
+
+        llm = _CodexChatModel(settings=dict(settings))
+    else:
+        llm = ChatOpenAI(
+            model=settings["model"],
+            api_key=resolve_api_key(settings),
+            base_url=_normalize_base_url(settings["api_base_url"]),
+            temperature=float(settings["temperature"] or 0.2),
+            timeout=180,
+            max_retries=0,
+        )
 
     def classify_node(state: AgentState):
         user_goal = state.get("user_goal", "")
@@ -460,6 +621,20 @@ def _graph_for(settings, db_path, stack=None):
         visible_body = final_text.split("```json", 1)[0].strip()
         style_rewritten = False
         structured = _structured_output(final_text)
+        if structured:
+            structured, grounding_audit = _ground_structured_output(structured, state)
+            final_text = _replace_structured_output(final_text, structured)
+            _record_step(
+                state["db_path"],
+                state["run_id"],
+                "critic",
+                "ground_structured_output",
+                {
+                    "task_type": state.get("task_type"),
+                    "module": state.get("module"),
+                },
+                grounding_audit,
+            )
         visible_body = final_text.split("```json", 1)[0].strip()
         if wants_concise_response(state.get("user_goal", ""), _response_style(state)) and len(visible_body) > 260:
             final_text = _compact_concise_response(final_text, structured)
@@ -581,9 +756,14 @@ def run_agent(
         run_id = create_agent_run(db_path, task_type, stored_subject_id, subject_ids, user_goal)
     with connect(db_path) as conn:
         settings = _settings(conn)
-        api_ready = bool(settings and settings["mode"] == "api" and resolve_api_key(settings))
+        if settings and settings["mode"] == "chatgpt":
+            api_ready = codex_auth_status()["logged_in"]
+        elif settings and settings["mode"] == "workbuddy":
+            api_ready = workbuddy.is_ready()
+        else:
+            api_ready = bool(settings and settings["mode"] == "api" and resolve_api_key(settings))
     if not api_ready:
-        message = "AI 教练还没有连接可用模型。请先到模型设置完成连接。"
+        message = "训练分析尚未配置可用模型。请先到模型设置完成连接。"
         with connect(db_path) as conn:
             fail_run(conn, run_id, message)
         raise AgentRunError(message)

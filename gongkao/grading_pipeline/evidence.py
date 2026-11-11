@@ -51,6 +51,10 @@ ESSAY_SCORING_GUIDANCE = """综合写作必须先判断整篇文章所处的整�
 若诊断中已经指出“事实偏差/材料误读”且某一主要论证部分空泛、缺少展开，通常不得给到80分以上；语言流畅、标题完整和分段清楚本身不足以进入优秀档。"""
 
 
+STRUCTURE_REVIEW_GUIDANCE = """结构审查必须单独完成，不能把“有标题、分段、分点”直接当成结构合理。先从设问任务、材料逻辑和所选参考答案的共性提炼可行结构，再按原答案实际顺序列出其各段/各分点的功能，逐项比较：对象与任务是否对应、层级是否并列、因果和先后是否成立、重点篇幅是否合理、论点到论据是否衔接、结尾是否回应设问。参考答案的排列不是唯一标准，若用户采用不同但同样合理的顺序，应明确说明为何可接受，不得机械扣分。
+structure_review 必须给出 expected_outline、answer_outline、comparison、verdict、issues、score_reason。verdict 只能是“合理”“需局部调整”“需重组”。每项 issue 必须引用用户答案中逐字连续的 answer_quote，指出来自题干、材料或参考答案共性的 reference_basis，解释排列/层级/论证问题，并给出具体调序或重组动作。若无实质问题，issues 留空，但 comparison 和 score_reason 仍须以具体结构证据说明。结构维度分必须与审查结论一致；不要默认肯定思路。"""
+
+
 def _evidence_card(row, role, confidence=None):
     source_type = row.get("source_type") or "context"
     question_id = row.get("question_id")
@@ -315,6 +319,8 @@ def build_combined_grading_prompt(
 
 {DIMENSION_SCORING_GUIDANCE}
 
+{STRUCTURE_REVIEW_GUIDANCE}
+
 输出保持干练：每个 reason、weight_reason 最多 60 字；aliases 每点最多 3 个；
 annotations 最多 6 条；material_reading 最多 6 条；optimization_suggestions 最多 5 条；
 personalized_findings 最多 3 条。不要重复题干、材料或参考答案全文。
@@ -350,8 +356,9 @@ personalized_findings 必须做深层归因，而不是复述症状：每条都�
     "conflicts": []
   }},
   "evaluation": {{
-    "point_matches": [{{"point_key": "", "status": "hit|partial|miss", "coverage_ratio": 0.0, "answer_quote": "尽量使用用户答案短且连续的原文", "reason": "覆盖或缺失说明", "confidence": 0.0, "missing_elements": []}}],
+    "point_matches": [{{"point_key": "", "status": "hit|partial|miss", "coverage_ratio": 0.0, "answer_quote": "尽量使用用户答案短且连续的原文", "reason": "覆盖或缺失说明", "confidence": 0.0, "missing_elements": [], "omission_reason": "仅 partial/miss 填写：结合用户实际写法说明为什么该点被漏掉或只覆盖一部分", "omission_suggestion": "仅 partial/miss 填写：给出针对该遗漏点的直接补写或改写建议"}}],
     "dimension_scores": {json.dumps(dimension_score_template, ensure_ascii=False)},
+    "structure_review": {{"expected_outline": ["依据设问和材料归纳的可行结构"], "answer_outline": ["按原答案顺序概括各段功能"], "comparison": "与参考答案共性结构的具体异同及替代结构是否合理", "verdict": "合理|需局部调整|需重组", "issues": [{{"answer_quote": "用户答案连续原文", "reference_basis": "题干、材料或参考答案共性依据", "problem": "具体结构问题", "revision": "具体调序或重组动作"}}], "score_reason": "结构维度给分依据"}},
     "holistic_adjustment_reason": "",
     "annotations": [{{"kind": "good|polish|change|delete|add|critical", "severity": "positive|low|medium|high|critical", "quote": "非补充类必须为用户答案连续原文", "anchor": "补充类必须为用户答案连续原文，表示插入在此句之后", "replacement": "", "reason": "", "point_key": ""}}],
     "reference_fusion": "共性核心点和差异补充点",
@@ -359,20 +366,22 @@ personalized_findings 必须做深层归因，而不是复述症状：每条都�
     "optimization_suggestions": ["具体建议"],
     "personalized_findings": [{{"finding": "跨题共性现象", "root_cause": "导致该现象的具体作答机制/原因", "next_step": "下一步针对这个原因练什么", "evidence_ids": [""], "confidence": "stage|recurring"}}],
     "summary": {{"verdict": "不含分数的整体判断", "strengths": ["主要优点"], "weaknesses": ["主要问题"]}},
-    "revised_answer": "可直接替换的修改版答案正文"
+    "revised_answer": "在原答案基础上做最小必要修改后的最终正文；不要输出删除线或批注标记"
   }}
 }}
 </smart_grading_json>
 
 规则：
 1. rubric 的采分点权重总和必须等于 content 维度满分。明确评分标准中的数值优先；否则依据任务必要性、材料层级和机构共识动态分配，禁止无理由平均分配。
-2. rubric.point_key 只使用 point-1、point-2 这类 ASCII 标识；evaluation.point_matches 必须逐字复制对应的 rubric.point_key，不得翻译、改写或另起编号。先逐点分析，再给 dimension_scores。内容分是结合重点覆盖、准确性、完整性和材料转化质量的综合判断，不得机械等于逐点覆盖加总。
+2. rubric.point_key 只使用 point-1、point-2 这类 ASCII 标识；evaluation.point_matches 必须逐字复制对应的 rubric.point_key，不得翻译、改写或另起编号。先逐点分析，再给 dimension_scores。point_based 模式的内容分由系统按固定采分点权重和命中档位计算，模型不得用整体印象抬高内容分。
 3. dimension_scores 必须逐项覆盖固定维度；JSON 中 max_score 只用于明确尺度，score 必须遵守上述得分制标尺且在0到 max_score之间。各维度问题只扣一次，不再输出整体质量乘数。
+3a. 先完成 structure_review 再给结构分；若结论为“需局部调整”或“需重组”，结构分必须体现对应损失，并在修改版答案中实施有依据的调整；结构合理时也须用具体证据证明，不能只写“结构清楚”。
 4. hit/partial 应提供用户答案中的短连续原文；若同一要点散落在多处，可用“……”连接多个按原文顺序出现的短片段，不得因此改判 miss。annotations 中除 add 外 quote 必须是连续原文；add 必须填写可在原文精确定位的 anchor，并把拟补文字写入 replacement。
-5. coaching context（跨题、知识、历史证据）只用于建议和 personalized_findings，绝不能影响 point_matches 或 dimension_scores。
-6. personalized_findings 的 finding 必须指出跨题共性（至少 2 条证据支撑才算 recurring）；root_cause 分析具体环节而不是复述症状；next_step 给出可执行的下一道题训练动作。宁可少写一条，也不要写空话。
-7. 修改版答案以 suggested_min—suggested_max 为目标，低于硬上限并预留至少8格。
-8. 只输出上述单个 JSON 块，不输出 Markdown 或额外解释。
+5. 对 partial/miss 必须填写 omission_reason 和 omission_suggestion；hit 两项留空。omission_reason 不能只写“未写到/遗漏该点”，应结合当前答案解释具体遗漏机制，例如“只写上位概括，材料中的对象和结果被压缩掉”“把两个独立要点合并，导致后一个机制未展开”“只写做法，没有写题目要求的成效”。如果无法可靠判断作答机制，就客观说明“已写到什么、缺少什么”，不得臆测心理原因。omission_suggestion 要直接告诉考生如何补足当前遗漏点，优先使用 rubric 的 minimum_expression、required_elements 和材料原词，避免泛泛写“加强概括能力”。
+6. coaching context（跨题、知识、历史证据）只用于建议和 personalized_findings，绝不能影响 point_matches 或 dimension_scores。
+7. personalized_findings 的 finding 必须指出跨题共性（至少 2 条证据支撑才算 recurring）；root_cause 分析具体环节而不是复述症状；next_step 给出可执行的下一道题训练动作。宁可少写一条，也不要写空话。
+8. 修改版答案以 suggested_min—suggested_max 为目标，低于硬上限并预留至少8格。生成时必须以本次作答原文为底稿做“最小必要修改”：正确表述和原有顺序尽量保留；在相关原句附近补遗漏点；删除材料外推、重复或低价值内容；只有原结构确实妨碍完成题干任务时才调整分点。revised_answer 只输出修改后的干净正文，不要自行加入删除线、括号批注或修改说明，界面会自动生成修订痕。
+9. 只输出上述单个 JSON 块，不输出 Markdown 或额外解释。
 """
 
 
@@ -517,6 +526,8 @@ coaching_context（跨题、知识和历史最小证据）：
 
 {essay_guidance}
 
+{STRUCTURE_REVIEW_GUIDANCE}
+
 输出保持干练：每个 reason 最多 60 字；annotations 最多 6 条；
 material_reading 最多 6 条；optimization_suggestions 最多 5 条；
 personalized_findings 最多 3 条。不要重复题干、材料或参考答案全文。
@@ -529,8 +540,9 @@ personalized_findings 必须做深层归因，而不是复述症状：每条都�
 <smart_grading_json>
 {{
   "evaluation": {{
-    "point_matches": [{{"point_key": "", "status": "hit|partial|miss", "coverage_ratio": 0.0, "answer_quote": "尽量使用用户答案短且连续的原文", "reason": "覆盖或缺失说明", "confidence": 0.0, "missing_elements": []}}],
+    "point_matches": [{{"point_key": "", "status": "hit|partial|miss", "coverage_ratio": 0.0, "answer_quote": "尽量使用用户答案短且连续的原文", "reason": "覆盖或缺失说明", "confidence": 0.0, "missing_elements": [], "omission_reason": "仅 partial/miss 填写：结合用户实际写法说明为什么该点被漏掉或只覆盖一部分", "omission_suggestion": "仅 partial/miss 填写：给出针对该遗漏点的直接补写或改写建议"}}],
     "dimension_scores": {json.dumps(dimension_score_template, ensure_ascii=False)},
+    "structure_review": {{"expected_outline": ["依据设问和材料归纳的可行结构"], "answer_outline": ["按原答案顺序概括各段功能"], "comparison": "与参考答案共性结构的具体异同及替代结构是否合理", "verdict": "合理|需局部调整|需重组", "issues": [{{"answer_quote": "用户答案连续原文", "reference_basis": "题干、材料或参考答案共性依据", "problem": "具体结构问题", "revision": "具体调序或重组动作"}}], "score_reason": "结构维度给分依据"}},
     "holistic_adjustment_reason": "",
     "annotations": [{{"kind": "good|polish|change|delete|add|critical", "severity": "positive|low|medium|high|critical", "quote": "非补充类必须为用户答案连续原文", "anchor": "补充类必须为用户答案连续原文，表示插入在此句之后", "replacement": "", "reason": "", "point_key": ""}}],
     "reference_fusion": "共性核心点和差异补充点",
@@ -538,23 +550,27 @@ personalized_findings 必须做深层归因，而不是复述症状：每条都�
     "optimization_suggestions": ["具体建议"],
     "personalized_findings": [{{"finding": "跨题共性现象", "root_cause": "导致该现象的具体作答机制/原因", "next_step": "下一步针对这个原因练什么", "evidence_ids": [""], "confidence": "stage|recurring"}}],
     "summary": {{"verdict": "不含分数的整体判断", "strengths": ["主要优点"], "weaknesses": ["主要问题"]}},
-    "revised_answer": "可直接替换的修改版答案正文"
+    "revised_answer": "在原答案基础上做最小必要修改后的最终正文；不要输出删除线或批注标记"
   }}
 }}
 </smart_grading_json>
 
 规则：
 1. 每个可计分 point_key 必须且只能出现一次，并逐字复制评分基准中的 point_key，不得翻译、改写或另起编号；先在原答案中查找同义表达，避免误判漏点。
-2. point_matches 的每项还必须输出 coverage_ratio（0—1）。hit 固定为1，miss固定为0；partial 根据 required_elements 中实际覆盖的核心语义给出0.1—0.9，不得把所有 partial 机械写成0.5。简洁同义表达完整覆盖核心语义时应判 hit，不能因没写 optional_details 而降分。
+2. point_matches 的每项还必须输出 coverage_ratio（0—1）。hit 固定为1，miss固定为0；partial 必须逐项核对 required_elements，并在 missing_elements 中列全未覆盖的核心语义。系统会把 partial 固定映射为基本命中75%、部分命中50%、弱命中25%，模型给出的连续比例只作为分档依据。简洁同义表达完整覆盖核心语义时应判 hit，不能因没写 optional_details 而降分。
+2a. missing_elements 只能从该点的 required_elements 里挑，逐条照抄评分基准原文，一条对应一条。不得把 canonical_expression 或材料里的细节层扩写（具体数据来源、个案名称、部门全称、具体数字）写成缺失项——那些属于 optional_details，写不写都不影响命中。
+2b. 用户写到了某条 required_element 的同义或上位表达就算覆盖；只有连上位概括都没有时才写进 missing_elements。宁可少报一条，也不得造出评分基准里不存在的遗漏点。
 3. hit/partial 应提供用户答案中的短连续原文；若语义散落在多处，可用“……”连接按顺序出现的多个短片段。找不到一个完整长句不等于未命中。annotations 的定位规则保持严格。
-4. dimension_scores 必须逐项覆盖评分基准 dimensions；max_score 只用于明确尺度，score 必须遵守上述得分制标尺且在0到 max_score之间。point_based 模式的内容分最终由系统按必答点计算；holistic_essay 模式必须整体评价立意、材料转化和论证质量，具体材料案例只是可替代论据，不得因未使用某一则材料直接判核心任务失败。
-5. 同一个问题只能在最相关维度扣一次，不得再使用 overall_quality_ratio、总分系数或统一封顶。
-6. recurring 只在 history_stable=true 时使用，否则写 stage。
-7. personalized_findings 只能引用上面存在且 role=personalization 的 evidence_id。
-8. personalized_findings 的 finding 必须指出跨题共性（至少 2 条证据支撑才算 recurring）；root_cause 分析具体环节而不是复述症状；next_step 给出可执行的下一道题训练动作。宁可少写一条，也不要写空话。
-9. 修改版答案必须按结构化 word_budget 生成，以 suggested_min—suggested_max 为目标，并至少预留8格安全余量。{ANSWER_GRID_RULES}
-10. 输出修改版答案前先在内部按上述规则估算占格；除文种或结构确有需要外避免手动换行，因为换行会结算当前行剩余格。不得用空话凑字数，也不得为了写全 optional_details 挤占 required 点。
-11. 不直接输出总分、分数算式、折算分或等级；系统将各维度 score 相加、校准并缩放到原题满分。
-12. 同题人工纠错优先用于识别同义表达，但本次 hit/partial 仍必须给出当前用户答案中的连续原句。
-13. 上面的机构参考答案数量大于 0 时，reference_fusion 必须说明实际纳入的机构答案及其共性/差异，严禁写“无参考答案”“无额外参考答案”或“未提供参考答案”。
+4. 对 partial/miss 必须填写 omission_reason 和 omission_suggestion；hit 两项留空。omission_reason 不能只写“未写到/遗漏该点”，应结合当前答案解释具体遗漏机制，例如“只写上位概括，材料中的对象和结果被压缩掉”“把两个独立要点合并，导致后一个机制未展开”“只写做法，没有写题目要求的成效”。如果无法可靠判断作答机制，就客观说明“已写到什么、缺少什么”，不得臆测心理原因。omission_suggestion 要直接告诉考生如何补足当前遗漏点，优先使用评分基准中的 minimum_expression、required_elements 和材料原词，避免泛泛写“加强概括能力”。
+5. dimension_scores 必须逐项覆盖评分基准 dimensions；max_score 只用于明确尺度，score 必须遵守上述得分制标尺且在0到 max_score之间。point_based 模式的内容分最终由系统按必答点计算；holistic_essay 模式必须整体评价立意、材料转化和论证质量，具体材料案例只是可替代论据，不得因未使用某一则材料直接判核心任务失败。
+5a. structure_review 必须先比较题目任务、材料及所选参考答案共性与用户实际段落/分点顺序，再判断是否需要调整；结构分与 verdict、具体问题必须一致。不得仅凭表面分段给高分，也不得因不同于某一份参考答案就扣分。
+6. 同一个问题只能在最相关维度扣一次，不得再使用 overall_quality_ratio、总分系数或统一封顶。
+7. recurring 只在 history_stable=true 时使用，否则写 stage。
+8. personalized_findings 只能引用上面存在且 role=personalization 的 evidence_id。
+9. personalized_findings 的 finding 必须指出跨题共性（至少 2 条证据支撑才算 recurring）；root_cause 分析具体环节而不是复述症状；next_step 给出可执行的下一道题训练动作。宁可少写一条，也不要写空话。
+10. 修改版答案必须按结构化 word_budget 生成，以 suggested_min—suggested_max 为目标，并至少预留8格安全余量。必须以本次作答原文为底稿做“最小必要修改”：能保留的原句、编号和顺序尽量保留；替换不规范表述时只改必要片段；遗漏点就近补入相关位置；删除材料外推、重复和低价值内容；只有原结构确实妨碍完成题干任务时才重排。revised_answer 只输出修改后的干净正文，不要加入删除线、括号批注或修改说明，界面会根据原答案自动生成修订痕。{ANSWER_GRID_RULES}
+11. 输出修改版答案前先在内部按上述规则估算答题纸占格；手动换行留下的格子和中间空白行都计入字数限制。不得用空话凑字数，也不得为了写全 optional_details 挤占 required 点。
+12. 不直接输出总分、分数算式、折算分或等级；系统将各维度 score 相加、校准并缩放到原题满分。
+13. 同题人工纠错优先用于识别同义表达，但本次 hit/partial 仍必须给出当前用户答案中的连续原句。
+14. 上面的机构参考答案数量大于 0 时，reference_fusion 必须说明实际纳入的机构答案及其共性/差异，严禁写“无参考答案”“无额外参考答案”或“未提供参考答案”。
 """

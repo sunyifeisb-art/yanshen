@@ -207,14 +207,15 @@ export function initializePractice(signal) {
       const value = editableValue(input);
       syncHiddenInput();
       const gridMetrics = answerGridMetrics(value);
+      // 答题纸以占用格数为准；换行剩余格和整行留白都占用额度。
       const current = gridMetrics.occupiedCells;
       const currentLines = gridMetrics.lines;
-      const limitLines = answerLineCount(limit ? limit - 1 : 0);
+      const limitLines = answerLineCount(limit);
       count.textContent = String(current);
       if (lineStatus) {
         lineStatus.textContent = limit
-          ? `行数：${currentLines}/${limitLines}`
-          : `行数：${currentLines}`;
+          ? `行数：${currentLines}/${limitLines}行`
+          : `行数：${currentLines}行`;
       }
       if (currentLineStatus) {
         const caretOffset = "value" in input
@@ -222,13 +223,16 @@ export function initializePractice(signal) {
           : contenteditableCaretOffset(input);
         currentLineStatus.textContent = `本行：${caretLineCells(value, caretOffset)}/25格`;
       }
-      form.classList.toggle("is-over-limit", Boolean(limit && current >= limit));
+      form.classList.toggle("is-over-limit", Boolean(limit && current > limit));
+      const writtenNote = gridMetrics.unusedCells
+        ? `；实写 ${gridMetrics.writtenCells} 字，换行留空 ${gridMetrics.unusedCells} 格`
+        : "";
       if (!limit) {
         status.textContent = current ? "题目未标注字数上限" : "开始作答后实时统计";
-      } else if (current >= limit) {
-        status.textContent = `已超出硬限制，至少需减少 ${current - limit + 1} 字（必须低于 ${limit} 字）`;
+      } else if (current > limit) {
+        status.textContent = `占格 ${current}/${limit}，超出 ${current - limit} 格${writtenNote}`;
       } else {
-        status.textContent = `还可输入 ${limit - current - 1} 字（必须低于 ${limit} 字）`;
+        status.textContent = `占格 ${current}/${limit}，还可写 ${limit - current} 格${writtenNote}`;
       }
       if (submitButton) {
         submitButton.hidden = value === serverSavedValue;
@@ -278,6 +282,27 @@ export function initializePractice(signal) {
       window.addEventListener("pagehide", () => serverAutosave.flushOnPageHide(), { signal: signal });
       window.addEventListener("gongkao:before-navigation", () => serverAutosave.flushOnPageHide(), { signal: signal });
     }
+    form.querySelector("[data-answer-save]")?.addEventListener("click", async () => {
+      // 只保存当前答案（草稿/服务器），不进入批改
+      syncHiddenInput();
+      syncAnswerFormat();
+      syncAnnotationInputs();
+      window.clearTimeout(annotationSaveTimers.get(input));
+      if (durationInput && questionTimer) {
+        questionTimer.persist();
+        durationInput.value = String(questionTimer.seconds());
+      }
+      if (paperDurationInput && questionTimer) {
+        paperDurationInput.value = String(questionTimer.paperSeconds ? questionTimer.paperSeconds() : 0);
+      }
+      removeDraft(storageKey);
+      if (serverAutosave) {
+        await serverAutosave.flush();
+      } else {
+        saveDraft();
+      }
+      updateAutosaveStatus("答案已保存");
+    });
     updateCounter();
   });
 

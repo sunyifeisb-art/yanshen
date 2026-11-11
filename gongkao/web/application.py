@@ -1,12 +1,18 @@
 """Compose the built-in HTTP server from grouped page controllers."""
 
 from ..agent_indexer import AgentIndexWorker
+from ..db import connect
+from ..normative_expressions import sync_normative_expression_history
 from .controllers import (
     AgentController,
     GradingController,
     HomeController,
+    IdiomsController,
     LearningController,
     LibraryController,
+    MistakesController,
+    NormativeExpressionsController,
+    PoliticalQuizController,
     PracticeController,
     SettingsController,
 )
@@ -36,8 +42,12 @@ from .runtime import (
 
 class Handler(
     HomeController,
+    IdiomsController,
     LibraryController,
     LearningController,
+    MistakesController,
+    NormativeExpressionsController,
+    PoliticalQuizController,
     SettingsController,
     AgentController,
     PracticeController,
@@ -111,6 +121,15 @@ class Handler(
         self.end_headers()
         self.wfile.write(raw)
 
+    def send_bytes(self, data, filename=None, mime="application/octet-stream"):
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        if filename:
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
+        self.end_headers()
+        self.wfile.write(data)
+
     def send_json(self, payload, status=200):
         raw = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(status)
@@ -159,6 +178,11 @@ class LoggingHTTPServer(ThreadingHTTPServer):
 def create_server(host="127.0.0.1", port=5000, db_path=None):
     resolved_db_path = Path(db_path) if db_path else user_db_path()
     prepare_user_database(resolved_db_path, seed_db_path())
+    # Keep the personal phrase library current before the first page opens.
+    # Unchanged reports are skipped by their stored signatures, so repeated
+    # application starts only process reports that are new or have changed.
+    with connect(resolved_db_path) as conn:
+        sync_normative_expression_history(conn)
     server = LoggingHTTPServer((host, port), Handler)
     server.app_context = ApplicationContext.create(resolved_db_path, ROOT)
     if db_path is None:

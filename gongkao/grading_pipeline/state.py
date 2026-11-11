@@ -12,7 +12,9 @@ ACTIVE_JOB_STATUSES = (
     "validating",
     "repairing_answer",
 )
-MAX_MODEL_CALLS = 3
+# 字数压缩常常需要多轮才能收敛（单轮往往只减掉几十格）。真正的死循环防线是
+# 「本轮压缩没有实际进展就停」，这里的上限只作为兜底，不参与正常流程的节奏。
+MAX_MODEL_CALLS = 20
 
 
 class GradingErrorCategory(StrEnum):

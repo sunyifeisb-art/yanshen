@@ -42,6 +42,8 @@ test("browser assets are valid UTF-8 and retain stable state keys", async () => 
   assert.match(stylesheet, /\.answer-compose-editor\s*\{[^}]*--answer-editor-height/s);
   assert.match(stylesheet, /\.answer-compose-editor\s*\{[^}]*height:\s*auto/s);
   assert.match(stylesheet, /\.answer-compose-editor\s*\{[^}]*overflow-y:\s*visible/s);
+  assert.match(stylesheet, /\.answer-compose-editor,\s*\n\.answer-editor \.direct-text-editor\[data-answer-input\]\s*\{[^}]*width:\s*calc\(25em\s*\+\s*27px\)/s);
+  assert.match(stylesheet, /\.answer-compose-editor,[\s\S]*?font-variant-east-asian:\s*full-width/s);
   assert.match(stylesheet, /\.sidebar-brand-row,[\s\S]*animation:\s*none\s*!important/);
   assert.match(stylesheet, /\.main\.is-partial-loading\s*\{[^}]*opacity:\s*1/s);
   assert.match(entryScript, /export function mountPage/);

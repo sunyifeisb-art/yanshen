@@ -132,6 +132,333 @@ test("an empty answer editor stays empty until the user types", async () => {
   dom.window.close();
 });
 
+test("material font controls resize material text and persist the choice", async () => {
+  const dom = installDom(`
+    <div class="tabbed-content" data-tabs>
+      <div data-material-font-controls>
+        <button type="button" data-material-font-size-down>A−</button>
+        <span data-material-font-size-value>16</span>
+        <button type="button" data-material-font-size-up>A+</button>
+      </div>
+      <section class="tab-panel active-panel" id="material-panel-0">
+        <div class="material-text">材料正文</div>
+      </section>
+    </div>
+  `);
+  localStorage.setItem("gongkao.materialFontSize:v1", "20");
+  const { initializeTabsAndPagination } = await import(`../../static/js/shell.js?material-font=${Date.now()}`);
+  initializeTabsAndPagination(new AbortController().signal, () => {});
+
+  const tabset = document.querySelector("[data-tabs]");
+  const value = document.querySelector("[data-material-font-size-value]");
+  const down = document.querySelector("[data-material-font-size-down]");
+  const up = document.querySelector("[data-material-font-size-up]");
+
+  assert.equal(tabset.style.getPropertyValue("--material-font-size"), "20px");
+  assert.equal(value.textContent, "20");
+  const pressDown = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+  assert.equal(down.dispatchEvent(pressDown), false);
+  assert.equal(pressDown.defaultPrevented, true);
+  assert.equal(tabset.style.getPropertyValue("--material-font-size"), "18px");
+  assert.equal(localStorage.getItem("gongkao.materialFontSize:v1"), "18");
+
+  // The browser still emits a click after the handled mousedown. It must not
+  // apply the delta twice.
+  down.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+  assert.equal(tabset.style.getPropertyValue("--material-font-size"), "18px");
+
+  // WKWebView/accessibility activation can emit a mouse-like click without a
+  // preceding mousedown. It must still resize even when detail is non-zero.
+  up.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+  assert.equal(tabset.style.getPropertyValue("--material-font-size"), "20px");
+
+  // Keyboard/programmatic activation has detail=0 and remains supported too.
+  up.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 0 }));
+  assert.equal(tabset.style.getPropertyValue("--material-font-size"), "22px");
+  dom.window.close();
+});
+
+test("material selectionchange opens the annotation toolbar and can apply a highlight", async () => {
+  const dom = installDom(`
+    <div class="material-text" style="line-height: 32px" data-material-highlight
+      data-annotation-type="material" data-annotation-id="3" data-highlight-scope="material-3">材料正文测试</div>
+  `);
+  dom.window.Range.prototype.getBoundingClientRect = () => ({
+    top: 100,
+    bottom: 120,
+    left: 50,
+    width: 100,
+    height: 20,
+    right: 150,
+  });
+  const annotations = await import(`../../static/js/annotations.js?selectionchange-highlight=${Date.now()}`);
+  const controller = new AbortController();
+  annotations.initializeAnnotations(controller.signal);
+  Object.defineProperty(document.documentElement, "clientWidth", { configurable: true, value: 1200 });
+  Object.defineProperty(document.documentElement, "clientHeight", { configurable: true, value: 800 });
+  const toolbar = document.querySelector("[data-highlight-toolbar]");
+  toolbar.getBoundingClientRect = () => ({
+    top: 0,
+    bottom: 40,
+    left: 0,
+    width: 240,
+    height: 40,
+    right: 240,
+  });
+
+  const material = document.querySelector("[data-material-highlight]");
+  const textNode = material.firstChild;
+  const range = document.createRange();
+  range.setStart(textNode, 0);
+  range.setEnd(textNode, 4);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  document.dispatchEvent(new Event("selectionchange"));
+  await new Promise((resolve) => window.setTimeout(resolve, 5));
+
+  assert.equal(toolbar.hidden, false);
+  assert.equal(toolbar.dataset.placement, "right");
+  assert.equal(toolbar.style.left, "162px");
+  toolbar.querySelector('[data-highlight-color="yellow"]').click();
+  assert.equal(material.querySelector(".material-highlight")?.textContent, "材料正文");
+
+  controller.abort();
+  dom.window.close();
+});
+
+test("same-paper material marks use one browser key across questions", async () => {
+  const dom = installDom(`
+    <div id="first" data-material-highlight data-highlight-scope="paper-7"
+      data-material-id="42" data-question-id="11" data-saved-annotations="[]">材料正文</div>
+    <div id="second" data-material-highlight data-highlight-scope="paper-7"
+      data-material-id="42" data-question-id="12" data-saved-annotations="[]">材料正文</div>
+  `);
+  const annotations = await import(`../../static/js/annotations.js?paper-sharing=${Date.now()}`);
+  const first = document.querySelector("#first");
+  const second = document.querySelector("#second");
+  assert.equal(annotations.materialHighlightKey(first), annotations.materialHighlightKey(second));
+  localStorage.setItem(
+    annotations.legacyMaterialHighlightKey(first),
+    JSON.stringify([{ start: 0, end: 2, color: "yellow" }]),
+  );
+  assert.equal(annotations.localTextAnnotations(first)?.[0]?.color, "yellow");
+  dom.window.close();
+});
+
+test("practice initialization updates the current 25-cell line counter without aborting page mount", async () => {
+  const dom = installDom(`
+    <form data-answer-form data-word-limit="500">
+      <div contenteditable="true" class="answer-compose-editor" data-answer-input>测试作答</div>
+      <span data-word-count>0</span>
+      <span data-word-status></span>
+      <span data-current-line-status></span>
+    </form>
+  `);
+  const practice = await import(`../../static/js/practice.js?practice-grid-import=${Date.now()}`);
+  practice.initializePractice(new AbortController().signal);
+
+  assert.equal(document.querySelector("[data-word-count]").textContent, "4");
+  assert.equal(document.querySelector("[data-current-line-status]").textContent, "本行：4/25格");
+  dom.window.close();
+});
+
+test("manual line breaks consume the 300-cell answer-sheet budget", async () => {
+  const dom = installDom(`
+    <form data-answer-form data-word-limit="不超过300字">
+      <div contenteditable="true" class="answer-compose-editor" data-answer-input></div>
+      <span data-word-count></span>
+      <span data-line-status></span>
+      <span data-word-status></span>
+      <span data-current-line-status></span>
+    </form>
+  `);
+  const practice = await import(`../../static/js/practice.js?inclusive-count=${Date.now()}`);
+  practice.initializePractice(new AbortController().signal);
+  const form = document.querySelector("[data-answer-form]");
+  const editor = form.querySelector("[data-answer-input]");
+  editor.textContent = `${"甲".repeat(9)}\n${"乙".repeat(275)}`;
+  editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
+  assert.equal(form.querySelector("[data-word-count]").textContent, "300");
+  assert.equal(form.querySelector("[data-line-status]").textContent, "行数：12/12行");
+  assert.match(form.querySelector("[data-word-status]").textContent, /还可写 0 格；实写 284 字，换行留空 16 格/);
+  assert.equal(form.classList.contains("is-over-limit"), false);
+
+  const { answerGridMetrics } = await import("../../static/js/core.js");
+  assert.equal(answerGridMetrics(`${editor.textContent}\n\n\n`).occupiedCells, 300);
+
+  editor.textContent += "丙";
+  editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
+  assert.equal(form.classList.contains("is-over-limit"), true);
+  assert.equal(form.querySelector("[data-line-status]").textContent, "行数：13/12行");
+  assert.match(form.querySelector("[data-word-status]").textContent, /超出 1 格/);
+  dom.window.close();
+});
+
+test("cmd-f page search counts matches and reveals hidden tabs and details", async () => {
+  const dom = installDom(`
+    <main class="main">
+      <p>第一处目标文字</p>
+      <div class="tabbed-content" data-tabs>
+        <button type="button" role="tab" class="active-tab" data-tab-target="panel-a" aria-selected="true">A</button>
+        <button type="button" role="tab" data-tab-target="panel-b" aria-selected="false">B</button>
+        <section class="tab-panel active-panel" id="panel-a">普通内容</section>
+        <section class="tab-panel" id="panel-b" hidden>
+          <details><summary>展开内容</summary><p>第二处目标文字</p></details>
+        </section>
+      </div>
+    </main>
+  `);
+  const shell = await import(`../../static/js/shell.js?page-find=${Date.now()}`);
+  const controller = new AbortController();
+  shell.initializeTabsAndPagination(controller.signal, () => {});
+  shell.initializePageFind(controller.signal);
+
+  document.dispatchEvent(new window.KeyboardEvent("keydown", {
+    key: "f",
+    metaKey: true,
+    bubbles: true,
+    cancelable: true,
+  }));
+  const bar = document.querySelector("[data-page-find]");
+  const input = bar.querySelector("[data-page-find-input]");
+  input.value = "目标文字";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+
+  assert.equal(bar.hidden, false);
+  assert.equal(bar.querySelector("[data-page-find-count]").textContent, "1 / 2");
+  input.dispatchEvent(new window.KeyboardEvent("keydown", {
+    key: "Enter",
+    bubbles: true,
+    cancelable: true,
+  }));
+
+  assert.equal(bar.querySelector("[data-page-find-count]").textContent, "2 / 2");
+  assert.equal(document.querySelector("#panel-b").hidden, false);
+  assert.equal(document.querySelector("#panel-b details").open, true);
+
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  assert.equal(bar.hidden, true);
+  controller.abort();
+  dom.window.close();
+});
+
+test("grading report tabs switch between software and imported reports", async () => {
+  const dom = installDom(`
+    <section class="inline-report-stack">
+      <div data-report-switcher>
+        <button class="grading-report-tab is-active" type="button" data-report-target="report-2">导入批改报告</button>
+        <button class="grading-report-tab" type="button" data-report-target="report-1">软件批改报告</button>
+      </div>
+      <article id="report-2" data-report-card>导入报告</article>
+      <article id="report-1" data-report-card hidden>软件报告</article>
+    </section>
+  `);
+  const grading = await import(`../../static/js/grading.js?report-switch=${Date.now()}`);
+  const controller = new AbortController();
+  grading.initializeGrading(controller.signal, () => {});
+
+  const imported = document.querySelector("#report-2");
+  const software = document.querySelector("#report-1");
+  const softwareButton = document.querySelector('[data-report-target="report-1"]');
+  assert.equal(imported.hidden, false);
+  assert.equal(software.hidden, true);
+  softwareButton.click();
+  assert.equal(imported.hidden, true);
+  assert.equal(software.hidden, false);
+  assert.equal(softwareButton.classList.contains("is-active"), true);
+  assert.equal(window.location.hash, "#report-1");
+  controller.abort();
+  dom.window.close();
+});
+
+test("grading markdown import auto-submits after a file is selected", async () => {
+  const dom = installDom(`
+    <form data-report-import-form>
+      <input type="file" data-report-import-file>
+      <button type="button" data-report-import-trigger>导入批改数据</button>
+      <span data-report-import-status></span>
+    </form>
+  `);
+  const grading = await import(`../../static/js/grading.js?report-import=${Date.now()}`);
+  const controller = new AbortController();
+  let submitted = false;
+  const form = document.querySelector("[data-report-import-form]");
+  form.requestSubmit = () => { submitted = true; };
+  grading.initializeGrading(controller.signal, () => {});
+  const input = document.querySelector("[data-report-import-file]");
+  Object.defineProperty(input, "files", { value: [{ name: "external-report.md" }] });
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+
+  assert.equal(submitted, true);
+  assert.equal(document.querySelector("[data-report-import-trigger]").disabled, true);
+  assert.match(document.querySelector("[data-report-import-status]").textContent, /external-report\.md/);
+  controller.abort();
+  dom.window.close();
+});
+
+test("native pdf export forwards one click to the mac host", async () => {
+  const dom = installDom(`
+    <main class="main">
+      <a href="/questions/7/export.pdf" download data-native-download data-download-label="本题 PDF">导出本题 PDF</a>
+    </main>
+  `);
+  const calls = [];
+  window.pywebview = {
+    api: {
+      download_file: async (href) => {
+        calls.push(href);
+        return { ok: true, path: "/Users/test/Downloads/题目.pdf" };
+      },
+    },
+  };
+  const shell = await import(`../../static/js/shell.js?native-download=${Date.now()}`);
+  const controller = new AbortController();
+  shell.initializeNativeDownloads(controller.signal);
+  document.querySelector("[data-native-download]").click();
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+  assert.deepEqual(calls, ["/questions/7/export.pdf"]);
+  assert.equal(document.querySelector("[data-native-download]").getAttribute("aria-busy"), null);
+  assert.match(document.querySelector("[data-native-download-toast]").textContent, /本题 PDF 已导出/);
+  controller.abort();
+  dom.window.close();
+});
+
+test("native pdf export never navigates the webview when the host bridge is late", async () => {
+  const dom = installDom(`
+    <main class="main">
+      <a href="/questions/7/export.pdf" download data-native-download data-download-label="本题 PDF">导出本题 PDF</a>
+    </main>
+  `);
+  delete window.pywebview;
+  const shell = await import(`../../static/js/shell.js?native-download-late=${Date.now()}`);
+  const controller = new AbortController();
+  const calls = [];
+  shell.initializeNativeDownloads(controller.signal);
+  const link = document.querySelector("[data-native-download]");
+  const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+  const dispatched = link.dispatchEvent(click);
+  assert.equal(dispatched, false);
+  assert.equal(click.defaultPrevented, true);
+
+  window.pywebview = {
+    api: {
+      download_file: async (href) => {
+        calls.push(href);
+        return { ok: true, path: "/Users/test/Downloads/题目.pdf" };
+      },
+    },
+  };
+  window.dispatchEvent(new Event("pywebviewready"));
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+  assert.deepEqual(calls, ["/questions/7/export.pdf"]);
+  assert.match(document.querySelector("[data-native-download-toast]").textContent, /本题 PDF 已导出/);
+  controller.abort();
+  dom.window.close();
+});
+
 test("record filters use regular partial navigation instead of the library list endpoint", async () => {
   const dom = installDom(`
     <main class="main">
@@ -357,4 +684,57 @@ test("saved paragraph alignment is restored and serialized", async () => {
   );
   assert.equal(practice.paragraphAlignmentsJson(editor), '["center","left","right"]');
   dom.window.close();
+});
+
+test("mistake notebook switches details and persists review state", async () => {
+  const dom = installDom(`
+    <div data-mistake-book>
+      <button data-mistake-select="report:1:point:a" class="mistake-card is-selected">A</button>
+      <button data-mistake-select="report:2:point:b" class="mistake-card">B</button>
+      <article data-mistake-detail="report:1:point:a">
+        <span data-mistake-state class="mistake-state-pill active">待复盘</span>
+        <b data-mistake-review-count>0</b>
+        <button data-mistake-action="review">复盘 +1</button>
+      </article>
+      <article data-mistake-detail="report:2:point:b" hidden>
+        <span data-mistake-state class="mistake-state-pill active">待复盘</span>
+        <b data-mistake-review-count>0</b>
+        <button data-mistake-action="mastered">标记已掌握</button>
+      </article>
+    </div>
+  `, "http://localhost/mistakes");
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    const values = new URLSearchParams(options.body);
+    const action = values.get("action");
+    return {
+      ok: true,
+      async json() {
+        return {
+          ok: true,
+          state: action === "mastered" ? "mastered" : "reviewing",
+          state_label: action === "mastered" ? "已掌握" : "复盘中",
+          is_starred: false,
+          review_count: action === "review" ? 1 : 0,
+        };
+      },
+    };
+  };
+  try {
+    const mistakes = await import(`../../static/js/mistakes.js?mistakes=${Date.now()}`);
+    mistakes.initializeMistakes(new AbortController().signal);
+    const secondCard = document.querySelector('[data-mistake-select="report:2:point:b"]');
+    secondCard.click();
+    assert.equal(secondCard.classList.contains("is-selected"), true);
+    assert.equal(document.querySelector('[data-mistake-detail="report:1:point:a"]').hidden, true);
+    assert.equal(document.querySelector('[data-mistake-detail="report:2:point:b"]').hidden, false);
+
+    document.querySelector('[data-mistake-detail="report:2:point:b"] [data-mistake-action]').click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(document.querySelector('[data-mistake-detail="report:2:point:b"] [data-mistake-state]').textContent, "已掌握");
+    assert.equal(secondCard.classList.contains("is-mastered"), true);
+  } finally {
+    globalThis.fetch = previousFetch;
+    dom.window.close();
+  }
 });

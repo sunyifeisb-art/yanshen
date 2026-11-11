@@ -1,6 +1,8 @@
 import html
 import json
 
+from ..grading import count_cjk_chars
+
 
 def _escape(value):
     return html.escape("" if value is None else str(value), quote=True)
@@ -109,6 +111,36 @@ def text_annotation_key(target_type, question_id=None, material_number=None, att
     raise ValueError("不支持的标注类型。")
 
 
+def paper_material_annotations(conn, paper_id):
+    """Read all saved marks for a paper, including older question-scoped marks."""
+    if not paper_id:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT a.* FROM text_annotations a
+        JOIN questions q ON q.id = a.question_id
+        WHERE a.target_type = 'material' AND q.paper_id = ?
+        ORDER BY a.updated_at, a.annotation_key
+        """,
+        (paper_id,),
+    ).fetchall()
+    merged = {}
+    for row in rows:
+        number = int(row["material_number"])
+        bucket = merged.setdefault(number, {"annotations": {}, "text_hash": ""})
+        for mark in normalize_text_annotations(row["annotations_json"]):
+            identity = (mark["start"], mark["end"], mark.get("quote", ""))
+            bucket["annotations"][identity] = mark
+        bucket["text_hash"] = row["text_hash"]
+    return {
+        number: {
+            "annotations_json": json.dumps(list(bucket["annotations"].values()), ensure_ascii=False),
+            "text_hash": bucket["text_hash"],
+        }
+        for number, bucket in merged.items()
+    }
+
+
 def save_text_annotations(
     conn,
     target_type,
@@ -126,9 +158,11 @@ def save_text_annotations(
     if target_type == "material":
         if question_id is None or material_number is None:
             raise ValueError("材料标注缺少题目或材料编号。")
-        exists = conn.execute(
+        material = conn.execute(
             """
-            SELECT 1
+            SELECT q.paper_id, (
+                SELECT MIN(id) FROM questions WHERE paper_id = q.paper_id
+            ) AS canonical_question_id
               FROM questions q
               JOIN paper_materials m ON m.paper_id = q.paper_id
              WHERE q.id = ? AND m.material_number = ?
@@ -136,8 +170,10 @@ def save_text_annotations(
             """,
             (question_id, material_number),
         ).fetchone()
-        if not exists:
+        if not material:
             raise ValueError("找不到对应材料。")
+        paper_id = material["paper_id"]
+        question_id = material["canonical_question_id"]
         attempt_id = None
     else:
         if attempt_id is None or not conn.execute(
@@ -149,7 +185,15 @@ def save_text_annotations(
     key = text_annotation_key(target_type, question_id, material_number, attempt_id)
     normalized = normalize_text_annotations(annotations)
     if not normalized:
-        conn.execute("DELETE FROM text_annotations WHERE annotation_key = ?", (key,))
+        if target_type == "material":
+            conn.execute(
+                """DELETE FROM text_annotations WHERE target_type = 'material'
+                   AND material_number = ?
+                   AND question_id IN (SELECT id FROM questions WHERE paper_id = ?)""",
+                (material_number, paper_id),
+            )
+        else:
+            conn.execute("DELETE FROM text_annotations WHERE annotation_key = ?", (key,))
         return key
     conn.execute(
         """
@@ -172,6 +216,13 @@ def save_text_annotations(
             json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
         ),
     )
+    if target_type == "material":
+        conn.execute(
+            """DELETE FROM text_annotations WHERE target_type = 'material'
+               AND material_number = ? AND annotation_key <> ?
+               AND question_id IN (SELECT id FROM questions WHERE paper_id = ?)""",
+            (material_number, key, paper_id),
+        )
     return key
 
 
@@ -268,6 +319,18 @@ def export_personal_data(conn, include_api_key=False):
         "grading_reports": [dict(row) for row in conn.execute("SELECT * FROM grading_reports ORDER BY id")],
         "grading_report_contexts": [dict(row) for row in conn.execute("SELECT * FROM grading_report_contexts ORDER BY report_id")],
         "grading_feedback": [dict(row) for row in conn.execute("SELECT * FROM grading_feedback ORDER BY id")],
+        "mistake_reviews": [dict(row) for row in conn.execute("SELECT * FROM mistake_reviews ORDER BY updated_at, issue_key")],
+        "normative_expressions": [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT expression, expression_key, category, status, is_starred,
+                       is_custom, note, created_at, updated_at
+                  FROM normative_expressions
+              ORDER BY id
+                """
+            )
+        ],
         "question_favorites": _backup_question_favorites(conn),
         "paper_favorites": _backup_paper_favorites(conn),
         "text_annotations": _backup_text_annotations(conn),
@@ -364,6 +427,8 @@ def import_personal_data(conn, payload):
         "reports": 0,
         "grading_contexts": 0,
         "grading_feedback": 0,
+        "mistake_reviews": 0,
+        "normative_expressions": 0,
         "question_favorites": 0,
         "paper_favorites": 0,
         "settings": 0,
@@ -378,6 +443,8 @@ def import_personal_data(conn, payload):
         "skipped_reports": 0,
         "skipped_grading_contexts": 0,
         "skipped_grading_feedback": 0,
+        "skipped_mistake_reviews": 0,
+        "skipped_normative_expressions": 0,
         "skipped_question_favorites": 0,
         "skipped_paper_favorites": 0,
         "skipped_annotations": 0,
@@ -562,7 +629,7 @@ def import_personal_data(conn, payload):
         values = [
             question_id,
             item.get("answer_text", ""),
-            int(item.get("word_count") or 0),
+            count_cjk_chars(item.get("answer_text", "")),
             item.get("grading_result", ""),
             1 if item.get("grading_references_configured") else 0,
             reference_ids,
@@ -694,6 +761,52 @@ def import_personal_data(conn, payload):
         )
         counts["grading_contexts"] += 1
 
+    # Rebuild the automatic expression evidence first, then restore the user's
+    # learning state and custom entries on top of it. Evidence itself is not
+    # backed up because it is deterministically derived from grading reports.
+    from ..normative_expressions import expression_key, sync_normative_expression_history
+
+    sync_normative_expression_history(conn)
+    for item in payload.get("normative_expressions") or []:
+        if not isinstance(item, dict):
+            counts["skipped_normative_expressions"] += 1
+            continue
+        expression = str(item.get("expression") or "").strip()
+        if len(expression) < 3:
+            counts["skipped_normative_expressions"] += 1
+            continue
+        key = str(item.get("expression_key") or "").strip() or expression_key(expression)
+        status = item.get("status") if item.get("status") in {"learning", "mastered", "hidden"} else "learning"
+        conn.execute(
+            """
+            INSERT INTO normative_expressions (
+                expression, expression_key, category, status, is_starred,
+                is_custom, note, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+            ON CONFLICT(expression_key) DO UPDATE SET
+                category = CASE
+                    WHEN excluded.is_custom = 1 OR normative_expressions.category = '其他规范表达'
+                    THEN excluded.category ELSE normative_expressions.category END,
+                status = excluded.status,
+                is_starred = excluded.is_starred,
+                is_custom = MAX(normative_expressions.is_custom, excluded.is_custom),
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            """,
+            (
+                expression[:180],
+                key,
+                str(item.get("category") or "其他规范表达")[:80],
+                status,
+                1 if item.get("is_starred") else 0,
+                1 if item.get("is_custom") else 0,
+                str(item.get("note") or "")[:1000],
+                item.get("created_at"),
+                item.get("updated_at"),
+            ),
+        )
+        counts["normative_expressions"] += 1
+
     for item in payload.get("grading_feedback") or []:
         if not isinstance(item, dict):
             counts["skipped_grading_feedback"] += 1
@@ -732,6 +845,54 @@ def import_personal_data(conn, payload):
             ),
         )
         counts["grading_feedback"] += 1
+
+    for item in payload.get("mistake_reviews") or []:
+        if not isinstance(item, dict):
+            counts["skipped_mistake_reviews"] += 1
+            continue
+        old_report_id = item.get("report_id")
+        old_attempt_id = item.get("attempt_id")
+        report_id = report_map.get(old_report_id)
+        report = conn.execute(
+            "SELECT gr.attempt_id, a.question_id FROM grading_reports gr JOIN attempts a ON a.id = gr.attempt_id WHERE gr.id = ?",
+            (report_id,),
+        ).fetchone() if report_id else None
+        issue_key = str(item.get("issue_key") or "").strip()
+        old_prefix = f"attempt:{old_attempt_id}:"
+        if not report or not issue_key.startswith(old_prefix):
+            counts["skipped_mistake_reviews"] += 1
+            continue
+        issue_key = f"attempt:{report['attempt_id']}:" + issue_key[len(old_prefix):]
+        state = item.get("state") if item.get("state") in {"active", "reviewing", "mastered"} else "active"
+        conn.execute(
+            """
+            INSERT INTO mistake_reviews (
+                issue_key, report_id, attempt_id, question_id, state, is_starred,
+                note, review_count, last_reviewed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+            ON CONFLICT(issue_key) DO UPDATE SET
+                state = excluded.state,
+                is_starred = excluded.is_starred,
+                note = excluded.note,
+                review_count = excluded.review_count,
+                last_reviewed_at = excluded.last_reviewed_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                issue_key,
+                report_id,
+                report["attempt_id"],
+                report["question_id"],
+                state,
+                1 if item.get("is_starred") else 0,
+                str(item.get("note") or "")[:4000],
+                _nonnegative_int(item.get("review_count")),
+                item.get("last_reviewed_at"),
+                item.get("created_at"),
+                item.get("updated_at"),
+            ),
+        )
+        counts["mistake_reviews"] += 1
 
     for item in payload.get("training_plan_items") or []:
         if not isinstance(item, dict):
@@ -912,5 +1073,3 @@ def import_personal_data(conn, payload):
         counts["feedback"] += 1
 
     return counts
-
-

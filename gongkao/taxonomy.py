@@ -330,3 +330,24 @@ def classify_question_type(prompt, requirements="", fallback="综合分析"):
 
 def infer_question_type(prompt, requirements=""):
     return classify_question_type(prompt, requirements)[0]
+
+
+PLACEHOLDER_TITLE = re.compile(r"第?\s*\d+\s*题")
+
+
+def derive_question_title(title, prompt, limit=60):
+    """Return a human-readable title for a question.
+
+    Imported banks often carry the same "第N题" placeholder for every row, which
+    makes lists unusable. Prefer a real title; otherwise fall back to a cleaned
+    excerpt of the prompt. Callers store the result so display needs no special
+    casing.
+    """
+    cleaned_title = re.sub(r"\s+", " ", title or "").strip()
+    if cleaned_title and not PLACEHOLDER_TITLE.fullmatch(cleaned_title):
+        return cleaned_title
+    text = re.sub(r"<[^>]+>", "", prompt or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return cleaned_title or "未命名题目"
+    return text[:limit] + ("…" if len(text) > limit else "")

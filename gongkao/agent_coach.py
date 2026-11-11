@@ -149,11 +149,11 @@ def first_screen_judgement(conn):
     summary = context["summary"]
     candidates = retrieve_candidates(conn, {"work_status": "unattempted"}, limit=3)
     if summary["attempt_count"] == 0:
-        lead = "先选一个训练模块，再直接问你的问题。"
+        lead = "选择题型，或直接开始第一次训练分析。"
     elif summary["report_count"] == 0:
-        lead = "可以先从最近作答开始复盘，也可以按题型问短板。"
+        lead = "已有作答记录；完成批改后可获得更准确的失分分析。"
     else:
-        lead = "选择一个模块，我会结合你的作答、批改和笔记回答。"
+        lead = "可直接分析失分问题、复盘最近作答或按短板推荐练习。"
     return {
         "lead": lead,
         "context": context,

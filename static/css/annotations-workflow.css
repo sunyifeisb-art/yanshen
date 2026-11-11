@@ -1,4 +1,114 @@
 /* Custom Annotation styles */
+
+/* 通用"选中文字→高亮/复制"浮动菜单（材料/题目/答案等所有内容文本） */
+.selection-menu {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid #dce4e1;
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 14px 38px rgba(31, 51, 45, .15), 0 2px 7px rgba(31, 51, 45, .07);
+}
+.selection-menu[hidden] { display: none; }
+
+.selection-menu-copy {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 6px;
+  background: var(--green, #2a8f6e);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.selection-menu-copy:hover { background: var(--green-dark, #1f7a5c); }
+
+.selection-menu-divider {
+  width: 1px;
+  height: 18px;
+  background: #e2e8e5;
+}
+
+.selection-menu-colors {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.selection-menu-color {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, .12);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.selection-menu-color[data-highlight-color="yellow"] { background: rgba(245, 196, 78, .75); }
+.selection-menu-color[data-highlight-color="orange"] { background: rgba(235, 139, 61, .75); }
+.selection-menu-color[data-highlight-color="pink"] { background: rgba(224, 116, 148, .7); }
+.selection-menu-color[data-highlight-color="purple"] { background: rgba(145, 105, 190, .7); }
+.selection-menu-color[data-highlight-color="blue"] { background: rgba(79, 143, 207, .7); }
+.selection-menu-color[data-highlight-color="green"] { background: rgba(86, 171, 133, .7); }
+.selection-menu-color:hover { border-color: rgba(31, 111, 87, .42); }
+
+/* Avoid WebView compositing flashes on floating annotation controls. */
+.selection-menu,
+.material-highlight-toolbar {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.material-highlight-toolbar .highlight-color:hover,
+.material-highlight-toolbar .highlight-note:hover,
+.material-highlight-toolbar .highlight-style:hover,
+.material-highlight-toolbar .highlight-clear:hover,
+.material-highlight-toolbar .highlight-copy:hover {
+  transform: none;
+}
+
+/* 复制结果轻提示 */
+.copy-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 40px;
+  z-index: 300;
+  transform: translateX(-50%);
+  padding: 8px 18px;
+  border-radius: 8px;
+  background: rgba(30, 41, 37, .92);
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
+}
+
+/* 标注工具栏里的复制按钮 */
+.highlight-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #2f4a42;
+  cursor: pointer;
+}
+.highlight-copy:hover { background: #edf5f2; }
+.highlight-copy .annotation-copy-icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .highlight-note-indicator {
   display: inline-flex;
   align-items: center;
@@ -146,7 +256,7 @@
 
 /* Annotation Popover Card */
 .annotation-popover-card {
-  position: absolute;
+  position: fixed;
   background: #ffffff;
   border: 1px solid var(--line);
   border-radius: 12px;

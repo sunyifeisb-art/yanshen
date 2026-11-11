@@ -3,6 +3,34 @@ import { paragraphAlignmentsJson } from "./practice.js";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
+function showDownloadToast(message) {
+  document.querySelector("[data-download-toast]")?.remove();
+  const toast = document.createElement("div");
+  toast.className = "copy-toast package-download-toast";
+  toast.dataset.downloadToast = "1";
+  toast.setAttribute("role", "status");
+  toast.textContent = message;
+  document.body.append(toast);
+  window.setTimeout(() => toast.remove(), 4000);
+}
+
+async function flushAnswerForExport() {
+  // 导出前把答题编辑器里最新的答案保存到服务端（与自动保存同一端点），
+  // 避免改了答案立刻导出时用到旧内容。
+  const answerForm = document.querySelector("[data-answer-form]");
+  if (!answerForm || !answerForm.dataset.autosaveUrl) return;
+  const input = answerForm.querySelector("[data-answer-input]");
+  if (!input) return;
+  const body = new URLSearchParams();
+  body.set("answer_text", editableValue(input));
+  body.set("answer_format_json", paragraphAlignmentsJson(input));
+  try {
+    await fetch(answerForm.dataset.autosaveUrl, { method: "POST", body });
+  } catch (error) {
+    // 保存失败不阻断导出，仍用服务端已保存的答案。
+  }
+}
+
 function initializeGradingReviews(signal) {
   document.querySelectorAll("[data-grading-review]").forEach((review) => {
     const svg = review.querySelector(".grading-review-connectors");
@@ -78,6 +106,102 @@ function initializeGradingReviews(signal) {
   });
 }
 
+function initializeReportSwitcher(signal) {
+  document.querySelectorAll("[data-report-switcher]").forEach((switcher) => {
+    const stack = switcher.closest(".inline-report-stack");
+    if (!stack) return;
+    const buttons = [...switcher.querySelectorAll("[data-report-target]")];
+    const cards = [...stack.querySelectorAll("[data-report-card]")];
+    if (!buttons.length || !cards.length) return;
+
+    const showReport = (targetId, updateHash = false) => {
+      if (!cards.some((card) => card.id === targetId)) return;
+      cards.forEach((card) => { card.hidden = card.id !== targetId; });
+      buttons.forEach((button) => {
+        const active = button.dataset.reportTarget === targetId;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+      if (updateHash) {
+        const url = new URL(window.location.href);
+        url.hash = targetId;
+        window.history.replaceState(window.history.state, "", url);
+      }
+    };
+
+    const fromHash = decodeURIComponent(window.location.hash.replace(/^#/, ""));
+    const defaultTarget = cards.some((card) => card.id === fromHash)
+      ? fromHash
+      : (buttons.find((button) => button.classList.contains("is-active"))?.dataset.reportTarget
+        || buttons[0].dataset.reportTarget);
+    showReport(defaultTarget);
+
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => showReport(button.dataset.reportTarget, true), { signal });
+    });
+    window.addEventListener("hashchange", () => {
+      const target = decodeURIComponent(window.location.hash.replace(/^#/, ""));
+      showReport(target);
+    }, { signal });
+  });
+}
+
+function initializeReportImport(signal) {
+  document.querySelectorAll("[data-report-import-form]").forEach((form) => {
+    const fileInput = form.querySelector("[data-report-import-file]");
+    const trigger = form.querySelector("[data-report-import-trigger]");
+    const status = form.querySelector("[data-report-import-status]");
+    if (!fileInput || !trigger) return;
+    trigger.addEventListener("click", () => fileInput.click(), { signal });
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      if (status) status.textContent = `正在导入：${file.name}`;
+      trigger.disabled = true;
+      trigger.textContent = "导入中...";
+      form.requestSubmit();
+    }, { signal });
+  });
+}
+
+export function initializeMaterialDrawer(signal) {
+  const trigger = document.querySelector("[data-open-grading-materials]");
+  const drawer = document.querySelector("[data-grading-material-drawer]");
+  const home = document.querySelector("[data-grading-material-home]");
+  const content = home?.querySelector("[data-grading-material-content]");
+  const drawerBody = drawer?.querySelector("[data-grading-material-drawer-body]");
+  const closeButton = drawer?.querySelector("[data-close-grading-materials]");
+  const placeholder = document.querySelector("[data-grading-material-placeholder]");
+  if (!trigger || !drawer || !home || !content || !drawerBody || !closeButton) return;
+
+  const close = (restoreFocus = true) => {
+    if (drawer.hidden) return;
+    home.append(content);
+    drawer.hidden = true;
+    if (placeholder) placeholder.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    if (restoreFocus) trigger.focus();
+  };
+  const open = () => {
+    if (!drawer.hidden) return;
+    drawerBody.append(content);
+    if (placeholder) placeholder.hidden = false;
+    drawer.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    closeButton.focus();
+  };
+
+  trigger.addEventListener("click", open, { signal });
+  closeButton.addEventListener("click", () => close(), { signal });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || drawer.hidden) return;
+    if (document.querySelector("#custom-annotation-modal.active, #custom-confirm-modal.active")) return;
+    event.preventDefault();
+    close();
+  }, { signal });
+  signal.addEventListener("abort", () => close(false), { once: true });
+}
+
 export const DEEP_THINKING_PREFERENCE_KEY = "gongkao.grading.deepThinking.v1";
 
 export function initializeDeepThinkingPreference(form, signal) {
@@ -100,7 +224,10 @@ export function initializeDeepThinkingPreference(form, signal) {
 }
 
 export function initializeGrading(signal, navigatePartial) {
+  initializeReportSwitcher(signal);
+  initializeReportImport(signal);
   initializeGradingReviews(signal);
+  initializeMaterialDrawer(signal);
   document.querySelectorAll("[data-grading-references]").forEach((form) => {
     initializeDeepThinkingPreference(form, signal);
     const checkboxes = Array.from(form.querySelectorAll("input[name='reference_id']"));
@@ -109,7 +236,7 @@ export function initializeGrading(signal, navigatePartial) {
     const dirtyNote = form.querySelector("[data-reference-dirty-note]");
     const count = document.querySelector("[data-reference-count]");
     const copyButton = document.querySelector("[data-package-copy]");
-    const downloadLink = document.querySelector("[data-package-download]");
+    const downloadLinks = [...document.querySelectorAll("[data-package-download]")];
     const gradeButton = document.querySelector("[data-grade-submit]");
     const apiPanel = gradeButton ? gradeButton.closest(".api-grade-panel") : null;
 
@@ -126,10 +253,10 @@ export function initializeGrading(signal, navigatePartial) {
       if (saveButton) saveButton.hidden = !dirty;
       if (dirtyNote) dirtyNote.hidden = !dirty;
       if (copyButton) copyButton.disabled = dirty;
-      if (downloadLink) {
-        downloadLink.classList.toggle("is-disabled", dirty);
-        downloadLink.setAttribute("aria-disabled", dirty ? "true" : "false");
-      }
+      downloadLinks.forEach((link) => {
+        link.classList.toggle("is-disabled", dirty);
+        link.setAttribute("aria-disabled", dirty ? "true" : "false");
+      });
     };
 
     form.querySelector("[data-reference-select-all]")?.addEventListener("click", () => {
@@ -142,13 +269,34 @@ export function initializeGrading(signal, navigatePartial) {
     });
     checkboxes.forEach((checkbox) => checkbox.addEventListener("change", updateState));
     if (customAnswer) customAnswer.addEventListener("input", updateState);
-    if (downloadLink) {
-      downloadLink.addEventListener("click", (event) => {
-        if (downloadLink.getAttribute("aria-disabled") === "true") {
+    downloadLinks.forEach((link) => {
+      link.addEventListener("click", async (event) => {
+        if (link.getAttribute("aria-disabled") === "true") {
           event.preventDefault();
+          return;
+        }
+        // WKWebView does not trigger downloads from anchor links; forward the
+        // click to the native host so the file is saved into ~/Downloads.
+        if (window.pywebview && window.pywebview.api && typeof window.pywebview.api.download_file === "function") {
+          event.preventDefault();
+          const url = link.getAttribute("href") || "";
+          link.classList.add("is-loading");
+          // 先把当前答案强制保存到服务端，确保导出的是最新内容（答案可能刚改过）。
+          await flushAnswerForExport();
+          window.pywebview.api.download_file(url)
+            .then((result) => {
+              link.classList.remove("is-loading");
+              showDownloadToast(result && result.ok
+                ? `已导出：${result.path}`
+                : `导出失败：${(result && result.error) || "未知错误"}`);
+            })
+            .catch((error) => {
+              link.classList.remove("is-loading");
+              showDownloadToast(`导出失败：${error && error.message ? error.message : error}`);
+            });
         }
       });
-    }
+    });
     if (copyButton) {
       copyButton.addEventListener("click", () => {
         const packageText = document.getElementById("grading-package");

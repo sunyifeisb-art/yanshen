@@ -283,7 +283,10 @@ class ReleaseRuntimeTest(unittest.TestCase):
             prepare_user_database(user_db, SEED)
             with connect(user_db) as conn:
                 question_id = conn.execute("SELECT id FROM questions ORDER BY id LIMIT 1").fetchone()["id"]
-                conn.execute("UPDATE ai_settings SET api_key = 'user-owned-key' WHERE id = 1")
+                # 模拟用户自己选择过厂商与模式，验证种子同步不会覆盖这些设置
+                conn.execute(
+                    "UPDATE ai_settings SET api_key = 'user-owned-key', mode = 'api', model = 'deepseek-v4-flash' WHERE id = 1"
+                )
                 cursor = conn.execute(
                     "INSERT INTO attempts (question_id, answer_text, word_count, personal_note) VALUES (?, '我的作答', 4, '我的复盘笔记')",
                     (question_id,),
@@ -318,8 +321,15 @@ class ReleaseRuntimeTest(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM paper_favorites").fetchone()[0], 1)
                 self.assertEqual(conn.execute("SELECT api_key FROM ai_settings WHERE id = 1").fetchone()[0], "user-owned-key")
                 self.assertEqual(conn.execute("SELECT mode FROM ai_settings WHERE id = 1").fetchone()[0], "api")
-                self.assertEqual(conn.execute("SELECT model FROM ai_settings WHERE id = 1").fetchone()[0], "deepseek-v4-pro")
-                self.assertEqual(conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0], 1751)
+                self.assertEqual(conn.execute("SELECT model FROM ai_settings WHERE id = 1").fetchone()[0], "deepseek-v4-flash")
+                # 以种子库实际题数为基准，避免题库扩容后写死数字失配：
+                # 同步时新增两道自定义题，并移除一道已废弃题。
+                with sqlite3.connect(SEED) as seed_conn:
+                    seed_count = seed_conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0],
+                    seed_count + 2 - 1,
+                )
                 self.assertFalse(conn.execute("SELECT 1 FROM questions WHERE question_code = 'GKS-OBSOLETE-Q1'").fetchone())
                 self.assertTrue(conn.execute("SELECT 1 FROM questions WHERE question_code = 'CUSTOM-QUESTION-1'").fetchone())
                 self.assertEqual(conn.execute("SELECT personal_note FROM attempts WHERE id = ?", (attempt_id,)).fetchone()[0], "我的复盘笔记")
@@ -882,7 +892,7 @@ class ReleaseRuntimeTest(unittest.TestCase):
 
                 overflow_report = (
                     "## 总体评分\n- 核心判断：必须逐字保留\n\n"
-                    f"## 修改版答案\n\n{'甲' * 250}\n\n"
+                    f"## 修改版答案\n\n{'甲' * 251}\n\n"
                     "## 优化建议\n1. 也必须逐字保留"
                 )
                 repaired_body = "乙" * 235
@@ -901,7 +911,7 @@ class ReleaseRuntimeTest(unittest.TestCase):
                     "gongkao.web.controllers.grading.chat_completion",
                     side_effect=[
                         (overflow_report, '{"round":1}'),
-                        (f"<revised_answer>{'丙' * 250}</revised_answer>", '{"round":2}'),
+                        (f"<revised_answer>{'丙' * 251}</revised_answer>", '{"round":2}'),
                     ],
                 ) as completion:
                     with urlopen(Request(f"{base_url}/attempts/{failed_attempt_id}/grade", data=b"", method="POST"), timeout=10) as response:
@@ -924,14 +934,14 @@ class ReleaseRuntimeTest(unittest.TestCase):
                 self.assertIn("核心判断：必须逐字保留", repaired_saved["report_text"])
                 self.assertIn("1. 也必须逐字保留", repaired_saved["report_text"])
                 self.assertIn(repaired_body, repaired_saved["report_text"])
-                self.assertNotIn("甲" * 250, repaired_saved["report_text"])
+                self.assertNotIn("甲" * 251, repaired_saved["report_text"])
                 self.assertIn("localized revised-answer repair", repaired_saved["raw_response"])
                 self.assertIsNotNone(failed_saved)
                 self.assertEqual(failed_saved["status"], "ok")
-                self.assertIn("丙" * 250, failed_saved["report_text"])
+                self.assertIn("丙" * 251, failed_saved["report_text"])
                 self.assertIn("批改报告", failed_html)
                 self.assertIn("修改版答案超出字数限制", failed_html)
-                self.assertIn("丙" * 250, failed_html)
+                self.assertIn("丙" * 251, failed_html)
                 self.assertNotIn("临时报告", failed_html)
             finally:
                 server.shutdown()
@@ -967,7 +977,7 @@ class ReleaseRuntimeTest(unittest.TestCase):
                         pass
 
                     rejected_body = urlencode(
-                        {"provider": "Codex", "report_text": f"## 修改版答案\n\n{'乙' * 250}"}
+                        {"provider": "Codex", "report_text": f"## 修改版答案\n\n{'乙' * 251}"}
                     ).encode("utf-8")
                     with urlopen(Request(f"{base_url}/attempts/{rejected_id}/reports", data=rejected_body, method="POST"), timeout=10):
                         pass
@@ -1607,12 +1617,12 @@ class ReleaseRuntimeTest(unittest.TestCase):
         self.assertIn("answerGridMetrics", script_source)
         self.assertIn("answerGridCellsForLine", script_source)
         self.assertIn('compact.includes("左右") && upper > 500', script_source)
-        self.assertIn("current >= limit", script_source)
-        self.assertIn("必须低于 ${limit} 字", script_source)
+        self.assertIn("current > limit", script_source)
+        self.assertIn("gridMetrics.writtenCells", script_source)
         self.assertIn("Math.ceil(Math.max(0, Number(characterCount) || 0) / 25)", script_source)
         self.assertIn("data-line-status", server_source)
         self.assertIn("data-current-line-status", server_source)
-        self.assertIn("${currentLines}/${limitLines}", script_source)
+        self.assertIn("${currentLines}/${limitLines}行", script_source)
         self.assertIn("caretLineCells", script_source)
         self.assertIn("本行：${caretLineCells(value, caretOffset)}/25格", script_source)
         self.assertNotIn("（每行25格）", script_source)
@@ -1638,7 +1648,8 @@ class ReleaseRuntimeTest(unittest.TestCase):
         self.assertIn("lineSpan", script_source)
         self.assertIn("data-editor-line", script_source)
         self.assertNotIn("collectLineUnits", script_source)
-        self.assertNotIn("intersectsNode", script_source)
+        self.assertIn("createTreeWalker(root, NodeFilter.SHOW_TEXT)", script_source)
+        self.assertNotIn("font-family: SimSun", style_source)
         self.assertIn("initializeFavoriteToggles", script_source)
         self.assertIn('name="duration_seconds"', server_source)
         self.assertIn('name="paper_elapsed_seconds"', server_source)
@@ -1698,7 +1709,7 @@ class ReleaseRuntimeTest(unittest.TestCase):
         self.assertIn("草稿已自动保存", script_source)
         self.assertIn("removeDraft(storageKey)", script_source)
         self.assertIn("submitButton.hidden", script_source)
-        self.assertIn("已超出", script_source)
+        self.assertIn("\u8d85\u51fa ${current - limit} \u683c", script_source)
         self.assertIn("[data-autosave-status]", style_source)
         self.assertIn("[hidden]", style_source)
         self.assertIn("display: none !important", style_source)
@@ -1760,6 +1771,10 @@ class ReleaseRuntimeTest(unittest.TestCase):
         self.assertIn('data-annotation-save-url="/annotations"', highlighted_material_html)
         self.assertIn("data-saved-annotations=", highlighted_material_html)
         self.assertIn("content-tabs-row", highlighted_material_html)
+        self.assertIn("data-material-font-controls", highlighted_material_html)
+        self.assertIn("data-material-font-size-down", highlighted_material_html)
+        self.assertIn("data-material-font-size-value", highlighted_material_html)
+        self.assertIn("data-material-font-size-up", highlighted_material_html)
         self.assertIn("data-clear-active-material-highlights", highlighted_material_html)
         self.assertIn('role="tab"', reference_html)
         self.assertIn("答案正文", reference_html)
@@ -1772,8 +1787,7 @@ class ReleaseRuntimeTest(unittest.TestCase):
         )
         script = read_static_scripts(ROOT)
         css = read_static_styles(ROOT)
-        self.assertIn('highlight_scope=f"question-{question_id}"', server_source)
-        self.assertIn('highlight_scope=f"question-{question[\'id\']}"', server_source)
+        self.assertIn('highlight_scope=f"paper-{question[\'paper_id\']}"', server_source)
         self.assertIn("gongkao.materialHighlights:v1", script)
         self.assertIn('data-annotation-target="material"', server_source)
         self.assertIn("saved_annotations=material_annotations", server_source)
@@ -1784,7 +1798,7 @@ class ReleaseRuntimeTest(unittest.TestCase):
         self.assertIn("normalizeMaterialHighlights", script)
         self.assertIn("showToolbarForHighlight", script)
         self.assertIn("!selection.isCollapsed", script)
-        self.assertIn("if (!toolbar.hidden && !toolbar.contains(event.target))", script)
+        self.assertIn("!toolbar.hidden && !toolbar.contains(event.target)", script)
         self.assertIn("dataset.highlightStart", script)
         self.assertIn("is-selected-highlight", script)
         self.assertIn("activeRangeFromHighlight", script)
@@ -2064,6 +2078,11 @@ class ReleaseRuntimeTest(unittest.TestCase):
         query = {"return_to": ["/papers"]}
         self.assertTrue(dispatch_get(handler, "/questions/42", query))
         handler.page_question.assert_called_once_with("/questions/42", query)
+        pdf_handler = MagicMock()
+        self.assertTrue(dispatch_get(pdf_handler, "/questions/42/export.pdf", {}))
+        pdf_handler.export_question_pdf.assert_called_once_with("/questions/42/export.pdf")
+        self.assertTrue(dispatch_get(pdf_handler, "/papers/8/export.pdf", {}))
+        pdf_handler.export_paper_pdf.assert_called_once_with("/papers/8/export.pdf")
         post_handler = MagicMock()
         self.assertTrue(dispatch_post(post_handler, "/attempts/42/update"))
         post_handler.handle_update_attempt.assert_called_once_with("/attempts/42/update")
@@ -2134,6 +2153,9 @@ class ReleaseRuntimeTest(unittest.TestCase):
                 self.assertNotIn(f'href="/attempts/{older_attempt_id}" class="card-main-link"', library_html)
                 self.assertIn(f'class="workflow-stage" href="/attempts/{latest_attempt_id}"', question_html)
                 self.assertIn(f'class="workflow-stage" href="/attempts/{latest_attempt_id}"', paper_html)
+                self.assertIn(f'href="/questions/{question["id"]}/export.pdf"', question_html)
+                self.assertIn(f'href="/papers/{question["paper_id"]}/export.pdf"', question_html)
+                self.assertIn('data-native-download', question_html)
                 self.assertNotIn('data-timer-autostart="1"', question_html)
                 self.assertIn('data-timer-autostart="1"', timed_question_html)
             finally:
@@ -2275,17 +2297,17 @@ class ReleaseRuntimeTest(unittest.TestCase):
         self.assertIn('data-ui-zoom-adjust="1"', server_source)
         self.assertIn('data-startup-restore="last-page"', server_source)
         self.assertIn('data-startup-restore="scroll"', server_source)
-        self.assertIn("<span>01</span><div><h2>AI 批改与教练</h2>", settings_source)
+        self.assertIn("<span>01</span><div><h2>批改与训练分析</h2>", settings_source)
         self.assertNotIn("<h2>教练索引</h2>", settings_source)
         self.assertIn("<span>02</span><div><h2>数据管理</h2>", settings_source)
         self.assertIn("<span>03</span><div><h2>启动与恢复</h2>", settings_source)
         self.assertIn("<span>04</span><div><h2>显示与缩放</h2>", settings_source)
         self.assertLess(settings_source.index("settings-data-panel"), settings_source.index("settings-restore-panel"))
         self.assertLess(settings_source.index("settings-restore-panel"), settings_source.index("display-settings"))
-        self.assertIn('name="agent_connection_mode"', settings_source)
-        self.assertIn('value="inherit"', settings_source)
-        self.assertIn('value="custom"', settings_source)
-        self.assertIn("沿用批改 API", settings_source)
+        self.assertNotIn('name="agent_connection_mode"', settings_source)
+        self.assertNotIn('value="custom"', settings_source)
+        self.assertNotIn("单独设置", settings_source)
+        self.assertIn("训练分析始终沿用上方批改服务", settings_source)
         self.assertNotIn("可留空沿用现有值", settings_source)
         self.assertIn("STARTUP_RESTORE_BOOTSTRAP", server_source)
         self.assertEqual(server_source.count("{settings_credits()}"), 2)
@@ -2317,7 +2339,7 @@ class ReleaseRuntimeTest(unittest.TestCase):
         self.assertIn("windowedBounds", host_source)
         self.assertIn("browser.ZoomFactor", host_source)
 
-    def test_ai_coach_can_inherit_or_override_grading_api(self):
+    def test_ai_coach_always_follows_grading_api(self):
         with tempfile.TemporaryDirectory() as directory:
             user_db = Path(directory) / "agent-api-settings.sqlite3"
             prepare_user_database(user_db, SEED)
@@ -2325,15 +2347,12 @@ class ReleaseRuntimeTest(unittest.TestCase):
                 conn.execute(
                     """
                     UPDATE ai_settings
-                       SET mode = 'codex', provider_name = 'GradingAI',
+                       SET mode = 'api', provider_name = 'GradingAI',
                            model = 'grading-model', api_key = 'grading-key'
                      WHERE id = 1
                     """
                 )
-                inherited = load_effective_agent_settings(conn)
-                self.assertEqual(inherited["mode"], "api")
-                self.assertEqual(inherited["provider_name"], "GradingAI")
-                self.assertEqual(inherited["model"], "grading-model")
+                # 即使 agent_ai_settings 里残留了"单独设置"，教练也必须跟随批改配置
                 conn.execute(
                     """
                     UPDATE agent_ai_settings
@@ -2342,11 +2361,12 @@ class ReleaseRuntimeTest(unittest.TestCase):
                      WHERE id = 1
                     """
                 )
-                overridden = load_effective_agent_settings(conn)
-                self.assertEqual(overridden["provider_name"], "CoachAI")
-                self.assertEqual(overridden["model"], "coach-model")
-                self.assertEqual(overridden["api_key"], "coach-key")
-                self.assertEqual(overridden["temperature"], 0.4)
+                effective = load_effective_agent_settings(conn)
+                self.assertEqual(effective["mode"], "api")
+                self.assertEqual(effective["provider_name"], "GradingAI")
+                self.assertEqual(effective["model"], "grading-model")
+                self.assertEqual(effective["api_key"], "grading-key")
+                self.assertEqual(effective["temperature"], 0.2)
                 grading = conn.execute("SELECT * FROM ai_settings WHERE id = 1").fetchone()
                 self.assertEqual(grading["provider_name"], "GradingAI")
                 self.assertEqual(grading["api_key"], "grading-key")
@@ -2357,9 +2377,10 @@ class ReleaseRuntimeTest(unittest.TestCase):
             try:
                 with urlopen(f"{base}/settings", timeout=10) as response:
                     html = response.read().decode("utf-8")
-                self.assertIn("AI 批改与教练", html)
-                self.assertIn("沿用批改 API", html)
-                self.assertIn("单独设置", html)
+                self.assertIn("批改与训练分析", html)
+                self.assertIn("训练分析始终沿用上方批改服务", html)
+                self.assertNotIn("单独设置", html)
+                self.assertNotIn('name="agent_connection_mode"', html)
                 body = urlencode(
                     {
                         "mode": "api",
@@ -2369,13 +2390,6 @@ class ReleaseRuntimeTest(unittest.TestCase):
                         "model": "grading-model",
                         "temperature": "0.2",
                         "api_key_env": "GRADING_API_KEY",
-                        "agent_provider_name": "CoachNext",
-                        "agent_connection_mode": "custom",
-                        "agent_api_base_url": "https://coach.example",
-                        "agent_model": "coach-next",
-                        "agent_temperature": "0.6",
-                        "agent_api_key_env": "COACH_API_KEY",
-                        "agent_api_key": "coach-next-key",
                     }
                 ).encode("utf-8")
                 request = Request(f"{base}/settings", data=body, method="POST")
@@ -2386,12 +2400,11 @@ class ReleaseRuntimeTest(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
             with connect(user_db) as conn:
-                saved = conn.execute("SELECT * FROM agent_ai_settings WHERE id = 1").fetchone()
-                self.assertEqual(saved["use_grading_api"], 0)
-                self.assertEqual(saved["provider_name"], "CoachNext")
-                self.assertEqual(saved["model"], "coach-next")
-                self.assertEqual(saved["temperature"], 0.6)
-                self.assertEqual(saved["api_key"], "coach-next-key")
+                saved_grading = conn.execute("SELECT * FROM ai_settings WHERE id = 1").fetchone()
+                self.assertEqual(saved_grading["model"], "grading-model")
+                effective = load_effective_agent_settings(conn)
+                self.assertEqual(effective["provider_name"], "GradingAI")
+                self.assertEqual(effective["model"], "grading-model")
 
     def test_app_icon_is_wired_into_browser_and_windows_build(self):
         shell_html = layout("图标测试", "<p>内容</p>", "home")
@@ -2520,7 +2533,8 @@ class ReleaseRuntimeTest(unittest.TestCase):
         self.assertIn('.workflow-title-row h1', css)
         self.assertIn('font-family: "Microsoft YaHei UI"', css)
         self.assertNotIn("STZhongsong", css)
-        self.assertNotIn("SimSun", css)
+        self.assertNotIn("font-family: SimSun", css)
+        self.assertNotIn('font-family: "SimSun"', css)
         grading_body = server_source.split('{workflow_header("grading"', 1)[1].split("self.send_html(", 1)[0]
         self.assertLess(grading_body.index('class="text-block answer-editor"'), grading_body.index("{report_section}"))
         self.assertLess(grading_body.index('class="text-block attempt-note-panel"'), grading_body.index("{report_section}"))

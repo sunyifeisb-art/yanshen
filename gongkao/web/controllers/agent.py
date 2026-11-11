@@ -65,6 +65,7 @@ class AgentController:
         if selected_module not in visible_modules:
             selected_module = "overview"
         selected_definition = module_definition(selected_module)
+        selected_scope_label = "全部题型" if selected_module == "overview" else selected_definition["label"]
         with connect(self.db_path) as conn:
             settings = load_effective_agent_settings(conn)
             judgement = first_screen_judgement(conn)
@@ -97,9 +98,14 @@ class AgentController:
               <p>{esc(run_summary)}</p>
             </article>""")
         if not run_rows:
-            run_rows.append('<p class="muted">还没有 AI 教练运行记录。</p>')
-        mode_label = "AI 教练已就绪" if settings and resolve_api_key(settings) else "连接模型后可用"
+            run_rows.append('<p class="muted">暂无分析记录。</p>')
+        mode_label = "分析可用" if settings and resolve_api_key(settings) else "尚未配置"
         summary = judgement["context"]["summary"]
+        weakness_profile = judgement["context"].get("weakness_profile") or []
+        skill_gaps = judgement["context"].get("skill_gaps") or []
+        recent_attempts = judgement["context"].get("recent_attempts") or []
+        recent_notes = judgement["context"].get("recent_notes") or []
+        candidates = judgement.get("candidates") or []
         type_context = "".join(
             f"""
             <div class="agent-context-row">
@@ -110,26 +116,199 @@ class AgentController:
         )
         module_tabs = "".join(
             f'<a class="agent-module-tab{" active" if module_id == selected_module else ""}" href="/agent?module={esc(module_id)}">'
-            f"<strong>{esc(definition['label'])}</strong><span>{esc(definition['focus'])}</span></a>"
+            f"<strong>{esc('全部题型' if module_id == 'overview' else definition['label'])}</strong><span>{esc(definition['focus'])}</span></a>"
             for module_id, definition in MODULES.items()
             if module_id in visible_modules
         )
         module_workbench = f"""
         <section class="agent-module-workbench">
+          <div class="agent-section-heading">
+            <div><p class="eyebrow">专项分析</p><h3>按题型分析</h3></div>
+            <span>选择题型后，只分析对应题型的作答与批改</span>
+          </div>
           <div class="agent-module-tabs">{module_tabs}</div>
+        </section>"""
+
+        average_score = summary.get("average_score")
+        average_score_text = f"{float(average_score):.1f}" if average_score is not None else "—"
+        metric_cards = "".join(
+            (
+                f'<article><span>{esc(label)}</span><strong>{esc(str(value))}</strong><small>{esc(note)}</small></article>'
+                for label, value, note in (
+                    ("累计作答", summary.get("attempt_count", 0), "已保存的作答"),
+                    ("批改报告", summary.get("report_count", 0), "已保存的批改"),
+                    ("平均得分", average_score_text, "按有分数的报告统计"),
+                    ("连续训练", f'{summary.get("streak", 0)} 天', f'累计活跃 {summary.get("active_days", 0)} 天'),
+                )
+            )
+        )
+
+        quick_actions = [
+            (
+                "诊断",
+                "分析主要失分问题",
+                "overview",
+                "结合我的全部作答、批改、笔记和长期记忆，诊断当前最影响分数的三个问题，按优先级说明证据、原因和下一步训练动作。",
+                "today",
+            ),
+            (
+                "失分",
+                "查看反复出现的失分点",
+                "top_loss",
+                "分析我所有训练里最反复、最严重、最影响得分的失分点。必须给出代表证据，并区分偶发问题和稳定短板。",
+                "today",
+            ),
+            (
+                "训练",
+                "按短板推荐练习题",
+                "improvement",
+                "结合我的薄弱项、最近训练和题库情况，推荐下一道最值得做的题，并说明训练目标、做题时重点观察什么。",
+                "next_question",
+            ),
+        ]
+        if judgement.get("latest_attempt_id"):
+            quick_actions.insert(
+                1,
+                (
+                    "复盘",
+                    "复盘最近一次作答",
+                    selected_module,
+                    "复盘最近一次作答：先判断最大失分原因，再指出原答案具体怎么改，最后给一条可迁移到下一题的规则。",
+                    "recent_review",
+                ),
+            )
+        quick_action_html = []
+        for badge, title, module_id, prompt, entrypoint in quick_actions:
+            attempt_input = (
+                f'<input type="hidden" name="attempt_id" value="{judgement["latest_attempt_id"]}">'
+                if entrypoint == "recent_review" and judgement.get("latest_attempt_id")
+                else ""
+            )
+            quick_action_html.append(
+                f"""
+                <form method="post" action="/agent/conversations" class="agent-mission-card">
+                  <input type="hidden" name="module" value="{esc(module_id)}">
+                  <input type="hidden" name="entrypoint" value="{esc(entrypoint)}">
+                  <input type="hidden" name="message" value="{esc(prompt)}">
+                  {attempt_input}
+                  <button type="submit">
+                    <span>{esc(badge)}</span>
+                    <strong>{esc(title)}</strong>
+                    <small>开始分析 →</small>
+                  </button>
+                </form>"""
+            )
+
+        weakness_rows = []
+        for item in weakness_profile[:5]:
+            severity = max(0.0, min(1.0, float(item.get("severity") or 0)))
+            impact_label = "高影响" if severity >= 0.72 else "中影响" if severity >= 0.42 else "低影响"
+            label = str(item.get("problem_type") or item.get("question_type") or "待归类短板")
+            question_type = str(
+                item.get("question_type")
+                or ("全部题型" if item.get("module") == "overview" else module_definition(item.get("module"))["label"])
+                or "全部题型"
+            )
+            weakness_rows.append(
+                f"""
+                <div class="agent-weakness-row">
+                  <div><strong>{esc(label)}</strong><span>{esc(question_type)} · 出现 {int(item.get("frequency") or 0)} 次</span></div>
+                  <i aria-label="影响度：{esc(impact_label)}"><b style="width:{round(severity * 100)}%"></b></i>
+                  <small>{esc(impact_label)}</small>
+                </div>"""
+            )
+        if not weakness_rows:
+            weakness_rows.append(
+                '<div class="agent-insight-empty"><strong>暂无稳定短板</strong><span>批改积累后，这里会显示反复出现的问题。</span></div>'
+            )
+
+        recent_attempt_rows = []
+        for item in recent_attempts[:4]:
+            review_suffix = " · 已批改" if int(item.get("report_count") or 0) else " · 待批改"
+            recent_attempt_rows.append(
+                f"""
+                <a class="agent-review-row" href="/agent?mode=review&attempt_id={int(item['id'])}">
+                  <span>{esc(item.get('question_type') or '申论')} · {esc(str(item.get('region') or ''))}</span>
+                  <strong>{esc(item.get('title') or '最近作答')}</strong>
+                  <small>{esc(format_beijing_time(item.get('created_at')))}{esc(review_suffix)}</small>
+                </a>"""
+            )
+        if not recent_attempt_rows:
+            recent_attempt_rows.append(
+                '<div class="agent-insight-empty"><strong>还没有作答记录</strong><span>完成一题后，可从这里一键进入带材料、答案和批改的复盘。</span></div>'
+            )
+
+        candidate_rows = []
+        for item in candidates[:3]:
+            candidate_rows.append(
+                f"""
+                <a class="agent-candidate-row" href="/questions/{int(item['id'])}">
+                  <div><span>{esc(item.get('question_type') or '申论')}</span><small>{esc(str(item.get('year') or ''))} · {esc(item.get('region') or '')}</small></div>
+                  <strong>{esc(item.get('title') or item.get('question_code') or '推荐训练题')}</strong>
+                  <em>去作答 →</em>
+                </a>"""
+            )
+        if not candidate_rows:
+            candidate_rows.append(
+                '<div class="agent-insight-empty"><strong>暂无符合条件的题目</strong><span>可调整题型、地区或作答状态后再试。</span></div>'
+            )
+
+        skill_rows = []
+        for item in skill_gaps[:4]:
+            name = item.get("label") or item.get("skill_name") or item.get("name") or item.get("title") or item.get("skill_key") or "能力项"
+            skill_rows.append(
+                f'<span class="agent-skill-chip"><strong>{esc(name)}</strong><small>{esc(item.get("problem_type") or "关联短板")}</small></span>'
+            )
+        if not skill_rows and recent_notes:
+            for item in recent_notes[:3]:
+                skill_rows.append(
+                    f'<span class="agent-skill-chip"><strong>个人复盘</strong><small>{esc(item.get("note") or "已有复盘笔记")}</small></span>'
+                )
+        if not skill_rows:
+            skill_rows.append('<span class="agent-skill-chip is-empty"><strong>暂无对应能力项</strong><small>需要更多批改记录</small></span>')
+
+        dashboard = f"""
+        <section class="agent-command-center">
+          <div class="agent-command-hero">
+            <div>
+              <p class="eyebrow">训练概览</p>
+              <h2>{esc(judgement["lead"])}</h2>
+              <p>可直接分析历史作答、复盘最近一题或按短板推荐练习；分析会使用已有作答、批改和笔记。</p>
+            </div>
+            <span class="agent-mode-pill">{esc(mode_label)}</span>
+          </div>
+          <div class="agent-metric-grid">{metric_cards}</div>
+          <section class="agent-mission-section">
+            <div class="agent-section-heading">
+              <div><p class="eyebrow">快捷功能</p><h3>常用分析</h3></div>
+              <span>选择一项直接开始</span>
+            </div>
+            <div class="agent-mission-grid">{"".join(quick_action_html)}</div>
+          </section>
+          {module_workbench}
+          <section class="agent-training-board">
+            <div class="agent-section-heading">
+              <div><p class="eyebrow">训练入口</p><h3>作答与推荐</h3></div>
+              <a href="/statistics">训练统计 →</a>
+            </div>
+            <div class="agent-training-columns">
+              <div><h4>最近作答</h4>{"".join(recent_attempt_rows)}</div>
+              <div><h4>推荐训练题</h4>{"".join(candidate_rows)}</div>
+            </div>
+          </section>
         </section>"""
         current_attempt_review = ""
         composer_hidden_scope = ""
-        composer_context_note = f"当前素材：{esc(selected_definition['label'])}"
+        composer_context_note = f"当前范围：{esc(selected_scope_label)}"
         composer_placeholder = (
-            f"自由提问：{esc(selected_definition['label'])}我的缺点是什么？最大失分点在哪里？下一步怎么改？"
+            f"输入问题，例如：{esc(selected_scope_label)}最常见的失分点是什么？下一步怎么练？"
         )
         if mode == "review" and attempt_id:
             composer_hidden_scope = f"""
               <input type="hidden" name="entrypoint" value="recent_review">
               <input type="hidden" name="attempt_id" value="{esc(attempt_id)}">"""
-            composer_context_note = "当前上下文：本题复盘"
-            composer_placeholder = "针对这次作答提问：这个结构能不能这样写？最大失分点在哪？下一版怎么改？"
+            composer_context_note = "当前作答：本题复盘"
+            composer_placeholder = "输入问题，例如：这次作答最大失分点在哪里？原答案该怎么改？"
             current_attempt_review = f"""
             <form method="post" action="/agent/conversations" class="agent-inline-action">
               <input type="hidden" name="entrypoint" value="recent_review">
@@ -141,31 +320,30 @@ class AgentController:
               </button>
             </form>"""
         body = f"""
-        <section class="agent-workspace">
-          <aside class="agent-thread-rail" aria-label="教练线程">
+        <section class="agent-workspace agent-workspace-home">
+          <aside class="agent-thread-rail" aria-label="分析记录">
             <div class="agent-rail-head">
-              <div><p class="eyebrow">AI Coach</p><h1>AI 训练教练</h1></div>
-              <a class="button small primary" href="/agent">新咨询</a>
+              <div><p class="eyebrow">训练分析</p><h1>训练分析</h1><span>作答分析 · 复盘 · 推荐</span></div>
+              <a class="button small primary" href="/agent">新对话</a>
             </div>
             <div class="agent-thread-list">{conversation_rows}</div>
+            <nav class="agent-rail-tools" aria-label="相关功能">
+              <a href="/statistics"><strong>训练统计</strong><span>查看分数、题型与训练天数</span></a>
+              <a href="/agent/memories"><strong>个人偏好</strong><span>目标考试、回答方式等</span></a>
+              <a href="/agent/evals"><strong>回答质量</strong><span>查看准确性和引用情况</span></a>
+            </nav>
           </aside>
           <article class="agent-main">
-            <header class="agent-main-head">
-              <div>
-                <span class="agent-mode-pill">{esc(mode_label)}</span>
-                <h2>{esc(judgement["lead"])}</h2>
-                <p>可以先选一个模块帮助 AI 聚焦，也可以直接输入你想问的问题。</p>
-              </div>
-            </header>
             <section class="agent-message-stream">
-              {module_workbench}
+              {dashboard}
               {current_attempt_review}
             </section>
-            <form class="agent-composer" method="post" action="/agent/conversations" data-agent-composer>
+            <form class="agent-composer agent-composer-prominent" method="post" action="/agent/conversations" data-agent-composer>
               <input type="hidden" name="module" value="{esc(selected_module)}">
               {composer_hidden_scope}
+              <div class="agent-composer-title"><strong>自由提问</strong><span>默认使用当前题型和已有训练记录</span></div>
               <details class="agent-scope-settings">
-                <summary>详细筛选</summary>
+                <summary>筛选范围</summary>
                 <div class="agent-scope-grid">
                   <label><span>题型</span><select name="question_type">{type_options}</select></label>
                   <label><span>地区</span><select name="region">{region_options}</select></label>
@@ -180,9 +358,28 @@ class AgentController:
               </div>
             </form>
           </article>
+          <aside class="agent-insight-rail" aria-label="训练分析结果">
+            <section>
+              <div class="agent-section-heading compact"><div><p class="eyebrow">问题统计</p><h3>常见失分问题</h3></div></div>
+              <div class="agent-weakness-list">{"".join(weakness_rows)}</div>
+            </section>
+            <section>
+              <div class="agent-section-heading compact"><div><p class="eyebrow">能力项</p><h3>需要加强的能力</h3></div></div>
+              <div class="agent-skill-list">{"".join(skill_rows)}</div>
+            </section>
+            <section class="agent-data-scope">
+              <div class="agent-section-heading compact"><div><p class="eyebrow">数据范围</p><h3>本次分析数据</h3></div></div>
+              <div class="agent-context-metrics">
+                <div><strong>{summary.get('attempt_count', 0)}</strong><span>作答</span></div>
+                <div><strong>{summary.get('report_count', 0)}</strong><span>报告</span></div>
+                <div><strong>{len(recent_notes)}</strong><span>近期笔记</span></div>
+              </div>
+              <div class="agent-context-list">{type_context or '<p class="muted">暂无题型统计。</p>'}</div>
+            </section>
+          </aside>
         </section>
         """
-        self.send_html(layout("AI 训练教练 - 研申", body, "agent", flashes))
+        self.send_html(layout("训练分析 - 研申", body, "agent", flashes))
 
     def page_agent_conversation(self, path):
         try:
@@ -234,14 +431,14 @@ class AgentController:
             run_link = (
                 f"""
                 <div class="agent-message-actions">
-                  <a class="button small" href="/agent/runs/{message["run_id"]}">工具轨迹</a>
+                  <a class="button small" href="/agent/runs/{message["run_id"]}">执行详情</a>
                 </div>"""
                 if message["run_id"]
                 else ""
             )
             message_rows.append(f"""
             <article class="agent-message {esc(message["role"])}{" is-pending" if is_pending else ""}"{' data-agent-pending="1"' if is_pending else ""}>
-              <header><strong>{"我" if message["role"] == "user" else "AI 教练"}</strong><span>{"生成中" if is_pending else esc(format_beijing_time(message["created_at"]))}</span></header>
+              <header><strong>{"我" if message["role"] == "user" else "分析结果"}</strong><span>{"分析中" if is_pending else esc(format_beijing_time(message["created_at"]))}</span></header>
               <div class="report-body">{agent_response_html(message["content"], self.path) if message["role"] == "assistant" else f"<p>{esc(message['content'])}</p>"}</div>
               {render_agent_rag_panel(message_metadata, self.path) if message["role"] == "assistant" and not is_pending else ""}
               {pending_status}
@@ -255,7 +452,7 @@ class AgentController:
         )
         trace_rows = []
         for run in run_rows:
-            run_summary = agent_summary_for_display(run["input_summary"] or run["user_goal"] or "查看工具轨迹")
+            run_summary = agent_summary_for_display(run["input_summary"] or run["user_goal"] or "查看执行详情")
             trace_rows.append(f"""
             <article class="agent-run-row">
               <a href="/agent/runs/{run["id"]}"><strong>{esc(run["task_type"])}</strong><span>{esc(run["status"])}</span></a>
@@ -266,19 +463,19 @@ class AgentController:
         awaiting_attr = ' data-agent-awaiting="1"' if last_role == "user" else ""
         body = f"""
         <section class="agent-workspace">
-          <aside class="agent-thread-rail" aria-label="教练线程">
+          <aside class="agent-thread-rail" aria-label="分析记录">
             <div class="agent-rail-head">
-              <div><p class="eyebrow">Threads</p><h1>教练线程</h1></div>
-              <a class="button small primary" href="/agent">新咨询</a>
+              <div><p class="eyebrow">对话记录</p><h1>历史对话</h1></div>
+              <a class="button small primary" href="/agent">新对话</a>
             </div>
             <div class="agent-thread-list">{conversation_rows}</div>
           </aside>
           <article class="agent-main">
             <header class="agent-main-head">
               <div>
-                <span class="agent-mode-pill">Coach Thread #{conversation_id}{" · " + esc(module_definition(conversation_module)["label"]) if conversation_module else ""}</span>
-                <h2>{esc(conversation["title"] or "AI 教练对话")}</h2>
-                <p>继续追问时会沿用这个线程里的训练意图和上下文。</p>
+                <span class="agent-mode-pill">对话 #{conversation_id}{" · " + esc(module_definition(conversation_module)["label"]) if conversation_module else ""}</span>
+                <h2>{esc(conversation["title"] or "未命名对话")}</h2>
+                <p>继续提问会保留本次对话中的题型和筛选条件。</p>
               </div>
               <div class="agent-head-actions"><a class="button ghost" href="/agent">返回首页</a></div>
             </header>
@@ -288,12 +485,12 @@ class AgentController:
             <form class="agent-composer" method="post" action="/agent/conversations/{conversation_id}/messages" data-agent-composer>
               <input type="hidden" name="module" value="{esc(conversation_module)}">
               <textarea name="message" rows="3" placeholder="继续追问…"></textarea>
-              <div class="agent-composer-footer"><span class="muted">上下文会保留在当前线程中</span><button class="button primary" type="submit">发送</button></div>
+              <div class="agent-composer-footer"><span class="muted">保留本次对话的题型与筛选条件</span><button class="button primary" type="submit">发送</button></div>
             </form>
           </article>
         </section>
         """
-        self.send_html(layout("AI 教练对话 - 研申", body, "agent"))
+        self.send_html(layout("训练分析对话 - 研申", body, "agent"))
 
     def page_agent_knowledge(self, path, query):
         knowledge_id = path.removeprefix("/agent/knowledge/").strip()
@@ -309,11 +506,11 @@ class AgentController:
 
         body = f"""
         <section class="page-head">
-          <div><p class="eyebrow">Knowledge Evidence</p><h1>{esc(card.get("title"))}</h1></div>
+          <div><p class="eyebrow">引用依据</p><h1>{esc(card.get("title"))}</h1></div>
           <div class="actions">{back_link(return_to, "返回引用位置")}</div>
         </section>
         <section class="settings-panel report-body">
-          <p class="muted">证据 ID：{esc(card.get("id"))} · 模块：{esc(module_definition(card.get("module"))["label"])}</p>
+          <p class="muted">资料编号：{esc(card.get("id"))} · 题型：{esc(module_definition(card.get("module"))["label"])}</p>
           <p>{esc(card.get("content"))}</p>
           {list_block("示例", card.get("examples"))}
           {list_block("常见误区", card.get("pitfalls"))}
@@ -321,7 +518,7 @@ class AgentController:
           {list_block("不适用范围", card.get("not_applicable_when"))}
         </section>
         """
-        self.send_html(layout(f"教材证据 - {card.get('title')}", body, "agent"))
+        self.send_html(layout(f"教材依据 - {card.get('title')}", body, "agent"))
 
     def page_agent_memories(self, flashes=None):
         with connect(self.db_path) as conn:
@@ -342,31 +539,31 @@ class AgentController:
             <article class="settings-panel">
               <div class="section-head">
                 <div><p class="eyebrow">{esc(type_labels.get(row["memory_type"], row["memory_type"]))}</p><h2>{esc(row["memory_key"])}</h2></div>
-                <form method="post" action="/agent/memories/{row["id"]}/delete" data-confirm="删除这条长期记忆吗？">
+                <form method="post" action="/agent/memories/{row["id"]}/delete" data-confirm="删除这条个人偏好吗？">
                   <button class="button small ghost" type="submit">删除</button>
                 </form>
               </div>
               <p>{esc(row["content"])}</p>
-              <p class="muted">置信度 {float(row["confidence"]):.2f} · {source_link} · 更新于 {esc(format_beijing_time(row["updated_at"]))}</p>
+              <p class="muted">记录可信度 {float(row["confidence"]):.2f} · {source_link} · 更新于 {esc(format_beijing_time(row["updated_at"]))}</p>
             </article>
             """)
         if not cards:
             cards.append(
-                '<section class="text-block"><p class="muted">还没有长期记忆。只有当你明确说出目标考试、训练节奏、回答偏好、稳定短板或已取得的改进时，系统才会记录。</p></section>'
+                '<section class="text-block"><p class="muted">暂无已保存的个人偏好。目标考试、训练节奏和回答方式等信息可在后续对话中自动记录。</p></section>'
             )
         body = f"""
         <section class="page-head">
-          <div><p class="eyebrow">Agent Memory</p><h1>长期记忆</h1><p>这些内容会跨对话线程生效，但不会代替题目、作答和批改证据。</p></div>
+          <div><p class="eyebrow">个人设置</p><h1>个人偏好</h1><p>保存目标考试、回答方式和训练节奏等信息，后续对话会自动使用。</p></div>
           <div class="actions">
-            <a class="button ghost" href="/agent">返回 AI 教练</a>
-            <form method="post" action="/agent/memories/clear" data-confirm="清空全部长期记忆吗？对话记录不会被删除。">
-              <button class="button ghost" type="submit">清空记忆</button>
+            <a class="button ghost" href="/agent">返回训练分析</a>
+            <form method="post" action="/agent/memories/clear" data-confirm="清空全部个人偏好吗？对话记录不会被删除。">
+              <button class="button ghost" type="submit">清空个人偏好</button>
             </form>
           </div>
         </section>
         <section class="settings-grid">{"".join(cards)}</section>
         """
-        self.send_html(layout("长期记忆 - 研申", body, "agent", flashes))
+        self.send_html(layout("个人偏好 - 研申", body, "agent", flashes))
 
     def page_agent_setup(self, query, flashes=None):
         self.redirect("/settings#ai-coach-settings")
@@ -401,7 +598,7 @@ class AgentController:
             token_usage = runtime.get("token_usage") or {}
             run_match = re.search(r"\brun_id=(\d+)", row["notes"] or "")
             trace_link = (
-                f'<a class="button small ghost" href="/agent/runs/{run_match.group(1)}">查看 Trace</a>'
+                f'<a class="button small ghost" href="/agent/runs/{run_match.group(1)}">查看执行详情</a>'
                 if run_match
                 else ""
             )
@@ -410,24 +607,25 @@ class AgentController:
               <header><strong>{esc(row["case_title"])}</strong><span>{row["score"]:.1f}</span></header>
               <p>{esc(row["suite_name"])} · {esc(row["task_type"])} · {esc(format_beijing_time(row["created_at"]))}</p>
               <div class="agent-eval-metrics">
-                <span>Tools {metrics.get("tool_call_accuracy", 0)}</span>
-                <span>Goal {metrics.get("agent_goal_accuracy", 0)}</span>
-                <span>Response {metrics.get("response_completeness", 0)}</span>
-                <span>Evidence {metrics.get("evidence_proxy", 0)}</span>
-                <span>Internal {metrics.get("internal_score", row["score"])}</span>
-                <span>Planner {fmt_metric(planner_layer.get("accuracy"))}</span>
-                <span>Recall@10 {fmt_metric(retriever_layer.get("recall_at_10"))}</span>
-                <span>MRR {fmt_metric(retriever_layer.get("mrr"))}</span>
-                <span>Tool layer {fmt_metric(tool_layer.get("accuracy"))}</span>
-                <span>Answer layer {fmt_metric(answer_layer.get("goal_accuracy"))}</span>
-                <span>Ragas {esc(ragas_status)} · {ragas_average}</span>
-                <span>Faithfulness {fmt_metric(ragas_scores.get("faithfulness"))}</span>
-                <span>Context P {fmt_metric(ragas_scores.get("context_precision"))}</span>
-                <span>Context R {fmt_metric(ragas_scores.get("context_recall"))}</span>
-                <span>Factual {fmt_metric(ragas_scores.get("factual_correctness"))}</span>
+                <span>数据读取 {metrics.get("tool_call_accuracy", 0)}</span>
+                <span>任务完成 {metrics.get("agent_goal_accuracy", 0)}</span>
+                <span>回答完整 {metrics.get("response_completeness", 0)}</span>
+                <span>引用依据 {metrics.get("evidence_proxy", 0)}</span>
+                <span>综合评分 {metrics.get("internal_score", row["score"])}</span>
+                <span>问题理解 {fmt_metric(planner_layer.get("accuracy"))}</span>
+                <span>资料查找 {fmt_metric(retriever_layer.get("recall_at_10"))}</span>
+                <span>资料排序 {fmt_metric(retriever_layer.get("mrr"))}</span>
+                <span>数据读取 {fmt_metric(tool_layer.get("accuracy"))}</span>
+                <span>任务完成 {fmt_metric(answer_layer.get("goal_accuracy"))}</span>
+                <span>事实核对 {esc(ragas_status)} · {ragas_average}</span>
+                <span>依据一致 {fmt_metric(ragas_scores.get("faithfulness"))}</span>
+                <span>引用准确 {fmt_metric(ragas_scores.get("context_precision"))}</span>
+                <span>依据覆盖 {fmt_metric(ragas_scores.get("context_recall"))}</span>
+                <span>事实正确 {fmt_metric(ragas_scores.get("factual_correctness"))}</span>
               </div>
               <div class="agent-eval-footer">
-                <small>{esc(row["notes"])} · {esc(runtime.get("model") or "unknown model")} · {fmt_metric(runtime.get("duration_ms"))} ms · {token_usage.get("total_tokens", "-")} tokens · prompt {esc(runtime.get("prompt_version") or "-")} · retrieval {esc(runtime.get("retrieval_version") or "-")}</small>
+                <small>{esc(row["notes"])}</small>
+                <details><summary>技术信息</summary><small>{esc(runtime.get("model") or "未记录模型")} · {fmt_metric(runtime.get("duration_ms"))} ms · {token_usage.get("total_tokens", "-")} tokens · prompt {esc(runtime.get("prompt_version") or "-")} · retrieval {esc(runtime.get("retrieval_version") or "-")}</small></details>
                 {trace_link}
                 <form method="post" action="/agent/evals/{row["id"]}/delete" data-confirm="删除这条评测记录吗？">
                   <button class="button small ghost" type="submit">删除</button>
@@ -435,20 +633,20 @@ class AgentController:
               </div>
             </article>""")
         if not result_rows:
-            result_rows.append('<p class="muted">还没有评测结果。运行一次固定回归集即可生成。</p>')
+            result_rows.append('<p class="muted">暂无质量检查结果。运行一次固定测试集即可生成。</p>')
         body = f"""
         <section class="page-head">
-          <div><p class="eyebrow">Agent Evals</p><h1>AI 教练评测</h1></div>
-          <div class="actions"><a class="button ghost" href="/agent">返回 AI 教练</a></div>
+          <div><p class="eyebrow">高级功能</p><h1>回答质量检查</h1></div>
+          <div class="actions"><a class="button ghost" href="/agent">返回训练分析</a></div>
         </section>
         <section class="agent-result-layout">
           <article class="agent-result-main">
             <section class="text-block">
-              <h2>固定回归集</h2>
-              <p class="muted">版本化回归集包含 60 条人工可审查用例。页面默认运行 5 条 smoke 用例；完整集、无模型 CI 子集和 baseline/candidate 对比请使用 scripts/run_agent_eval.py。</p>
+              <h2>快速检查</h2>
+              <p class="muted">共准备 60 条可复核用例。页面每次抽取 5 条检查；完整检查可通过项目脚本运行。</p>
               <div class="actions">
               <form method="post" action="/agent/evals/run">
-                <button class="button primary" type="submit">运行评测</button>
+                <button class="button primary" type="submit">开始检查</button>
               </form>
               <form method="post" action="/agent/evals/clear" data-confirm="清空所有评测记录吗？这不会删除教练对话或运行记录。">
                 <button class="button ghost" type="submit">清空记录</button>
@@ -461,15 +659,15 @@ class AgentController:
           </article>
           <aside class="agent-side">
             <section class="tool-panel">
-              <h2>什么时候用</h2>
-              <p class="muted">改过 Agent 后跑；换模型后跑；觉得回复质量变差时跑。平时做题和复盘不用管它。</p>
+              <h2>使用场景</h2>
+              <p class="muted">修改训练分析逻辑、调整模型或发现回答质量下降时运行；日常做题和复盘无需使用。</p>
               <h2>指标说明</h2>
-              <p class="muted">Planner 看查询规划；Recall@10 与 MRR 看 gold evidence 召回；Tool 看工具轨迹；Answer 看目标覆盖；Ragas 看事实忠实度。每条记录可进入 Trace 定位具体步骤。</p>
+              <p class="muted">问题理解看是否读懂用户目标；资料查找和排序看是否找到正确材料；数据读取看训练数据是否调用正确；任务完成看是否回答到位；事实核对看回答是否符合引用依据。</p>
             </section>
           </aside>
         </section>
         """
-        self.send_html(layout("AI 教练评测 - 研申", body, "agent", flashes))
+        self.send_html(layout("回答质量检查 - 研申", body, "agent", flashes))
 
     def page_agent_run(self, path):
         try:
@@ -502,9 +700,9 @@ class AgentController:
         )
         body = f"""
         <section class="page-head">
-          <div><p class="eyebrow">Agent Run #{run_id} · {esc(run["status"])}</p><h1>AI 教练结果</h1></div>
+          <div><p class="eyebrow">分析记录 #{run_id} · {esc(run["status"])}</p><h1>分析结果</h1></div>
           <div class="actions">
-            <a class="button ghost" href="/agent">返回 AI 教练</a>
+            <a class="button ghost" href="/agent">返回训练分析</a>
           </div>
         </section>
         <section class="agent-result-layout">
@@ -520,8 +718,8 @@ class AgentController:
               <p class="muted">{esc(agent_summary_for_display(run["input_summary"] or run["user_goal"] or "无摘要"))}</p>
             </section>
             <section class="tool-panel">
-              <h2>工具轨迹</h2>
-              <div class="agent-step-list">{"".join(step_rows) or '<p class="muted">没有工具轨迹。</p>'}</div>
+              <h2>执行详情</h2>
+              <div class="agent-step-list">{"".join(step_rows) or '<p class="muted">暂无执行详情。</p>'}</div>
             </section>
             <section class="tool-panel">
               <h2>反馈</h2>
@@ -535,7 +733,7 @@ class AgentController:
           </aside>
         </section>
         """
-        self.send_html(layout("AI 教练结果 - 研申", body, "agent"))
+        self.send_html(layout("分析结果 - 研申", body, "agent"))
 
     def handle_agent_run(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -563,7 +761,7 @@ class AgentController:
                 module=form.get("module", [""])[0].strip(),
             )
         except AgentRunError as exc:
-            self.page_agent({}, [("error", f"AI 教练运行失败：{exc}")])
+            self.page_agent({}, [("error", f"训练分析失败：{exc}")])
             return
         self.redirect(f"/agent/runs/{run_id}")
 
@@ -588,7 +786,7 @@ class AgentController:
                 review_attempt_id=_int_or_none(form.get("attempt_id", [""])[0]),
             )
         except AgentRunError as exc:
-            self.page_agent({}, [("error", f"AI 教练运行失败：{exc}")])
+            self.page_agent({}, [("error", f"训练分析失败：{exc}")])
             return
         self.redirect(f"/agent/conversations/{conversation_id}")
 
@@ -610,7 +808,7 @@ class AgentController:
                 auto_approve=False,
             )
         except AgentRunError as exc:
-            self.page_agent({}, [("error", f"AI 教练运行失败：{exc}")])
+            self.page_agent({}, [("error", f"训练分析失败：{exc}")])
             return
         self.redirect(f"/agent/conversations/{conversation_id}")
 

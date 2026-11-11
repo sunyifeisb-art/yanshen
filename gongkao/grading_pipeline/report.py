@@ -25,7 +25,7 @@ def _safe_overall_summary(result):
     else:
         text = str(result.get("overall_summary") or "").strip()
     text = re.sub(r"(?:总评|总分|得分)\s*[：:].*?(?:。|$)", "", text).strip("；。 ")
-    return text or "请结合维度得分与采分点分析查看。"
+    return text or "请结合维度得分与遗漏点分析查看。"
 
 
 def render_grading_report(
@@ -107,77 +107,94 @@ def render_grading_report(
     point_by_key = {
         point.get("point_key"): point for point in rubric.get("points", [])
     }
-    status_labels = {"hit": "命中", "partial": "部分命中", "miss": "未命中"}
-    importance_labels = {
-        "critical": "核心",
-        "major": "重要",
-        "supporting": "补充",
-    }
+
+    def omission_material_basis(point):
+        items = []
+        for item in point.get("material_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            quote = str(item.get("quote") or "").strip()
+            if not quote:
+                continue
+            material_number = item.get("material_number")
+            prefix = f"材料{material_number}：" if material_number not in {None, ""} else "材料："
+            items.append(f"{prefix}“{quote}”")
+            if len(items) >= 2:
+                break
+        if items:
+            return "；".join(items)
+        fallback = str(point.get("canonical_expression") or point.get("minimum_expression") or "").strip()
+        return fallback or "请回到评分基准对应材料定位该点。"
+
+    omission_matches = [
+        match
+        for match in result.get("point_matches", [])
+        if match.get("status") in {"partial", "miss"}
+    ]
     lines.extend(
         [
             "",
-            "## 采分点分析",
-            "| 采分点 | 重要性 | 建议权重 | 命中情况 | 用户答案证据 | 判断依据 |",
-            "| --- | --- | ---: | --- | --- | --- |",
+            "## 遗漏点分析",
+            "| 遗漏的采分点 | 材料依据 | 遗漏原因 | 整体建议 |",
+            "| --- | --- | --- | --- |",
         ]
     )
-    for match in result.get("point_matches", []):
+    for match in omission_matches:
         point = point_by_key.get(match.get("point_key")) or {}
-        status = status_labels.get(match.get("status"), "未命中")
+        label = point.get("label") or match.get("point_key") or ""
         if match.get("status") == "partial":
-            ratio = round(float(match.get("coverage_ratio") or 0) * 100)
-            status += f"（覆盖{ratio}%）"
-        if match.get("evidence_status") == "unresolved" and match.get("status") in {"hit", "partial"}:
-            status += " · 证据待复核"
+            coverage = float(match.get("coverage_ratio") or 0)
+            ratio = round(coverage * 100)
+            band = "基本命中" if coverage >= 0.75 else ("部分命中" if coverage >= 0.5 else "弱命中")
+            label += f"（{band}，仍缺{100 - ratio}%核心语义）"
+        missing_elements = [
+            str(value).strip()
+            for value in (match.get("missing_elements") or [])
+            if str(value or "").strip()
+        ]
+        omission_reason = str(match.get("omission_reason") or "").strip()
+        if not omission_reason:
+            if match.get("status") == "partial" and missing_elements:
+                omission_reason = f"已写到部分相关内容，但缺少：{'、'.join(missing_elements)}。"
+            else:
+                omission_reason = str(match.get("reason") or "原答案未体现该采分点。").strip()
+        suggestion = str(match.get("omission_suggestion") or "").strip()
+        if not suggestion:
+            minimum_expression = str(point.get("minimum_expression") or "").strip()
+            if minimum_expression:
+                suggestion = f"建议补写：{minimum_expression}"
+            elif missing_elements:
+                suggestion = f"优先补充：{'、'.join(missing_elements)}。"
+            else:
+                suggestion = "按材料原词补足该点的关键动作、对象、限定和结果。"
         lines.append(
-            "| {label} | {importance} | {weight} | {status} | {quote} | {reason} |".format(
-                label=(point.get("label") or match.get("point_key") or "").replace(
-                    "|",
-                    "／",
-                ),
-                importance=importance_labels.get(
-                    point.get("importance"),
-                    "补充",
-                ),
-                weight=_format_score(
-                    float(point.get("weight") or 0) * display_scale
-                ),
-                status=status,
-                quote=(match.get("answer_quote") or "未体现").replace("|", "／"),
-                reason=(
-                    match.get("reason") or point.get("weight_reason") or ""
-                ).replace("|", "／"),
+            "| {label} | {basis} | {reason} | {suggestion} |".format(
+                label=str(label).replace("|", "／"),
+                basis=omission_material_basis(point).replace("|", "／"),
+                reason=omission_reason.replace("|", "／"),
+                suggestion=suggestion.replace("|", "／"),
             )
         )
+    if not omission_matches:
+        lines.append("| 本次未发现需补充的采分点 | — | — | 保持当前要点完整度，继续检查结构与表达。 |")
 
-    lines.extend(["", "## 原文可视化批注"])
-    annotation_labels = {
-        "good": "亮点",
-        "polish": "润色",
-        "change": "修改",
-        "delete": "删减",
-        "add": "补充",
-        "critical": "关键",
-    }
-
-    def annotation_field(value):
-        return str(value or "").replace("|", "／").replace("]", "）").strip()
-
-    for item in result.get("annotations", []):
-        content = item.get("quote") or item.get("replacement") or "建议补充"
-        reason = item.get("reason") or item.get("replacement") or ""
-        lines.append(
-            "- [{kind}|{content}|{reason}|{anchor}|{severity}|{replacement}]".format(
-                kind=annotation_labels.get(item.get("kind"), "修改"),
-                content=annotation_field(content),
-                reason=annotation_field(reason),
-                anchor=annotation_field(item.get("anchor")),
-                severity=annotation_field(item.get("severity")),
-                replacement=annotation_field(item.get("replacement")),
+    structure = result.get("structure_review") or {}
+    lines.extend(["", "## 结构与顺序审查"])
+    if structure:
+        lines.append(f"- 审查结论：{structure.get('verdict') or '待核查'}")
+        lines.append("- 题目与材料支持的结构：" + " → ".join(structure.get("expected_outline") or ["未提供"]))
+        lines.append("- 你的答案实际结构：" + " → ".join(structure.get("answer_outline") or ["未提供"]))
+        lines.append(f"- 与参考答案的比较：{structure.get('comparison') or '未提供'}")
+        lines.append(f"- 结构分依据：{structure.get('score_reason') or '未提供'}")
+        for index, issue in enumerate(structure.get("issues") or [], start=1):
+            lines.append(
+                f"{index}. 原文“{issue['answer_quote']}”；依据：{issue['reference_basis']}；"
+                f"问题：{issue['problem']}；调整：{issue['revision']}"
             )
-        )
-    if not result.get("annotations"):
-        lines.append("- 本次未生成通过原文校验的可视化批注。")
+        if not structure.get("issues"):
+            lines.append("- 具体调整：无须因参考答案排列不同而机械调整。")
+    else:
+        lines.append("- 本次报告未提供可核对的结构审查，请重新批改。")
 
     lines.extend(["", "## 材料领读"])
     lines.extend(f"- {item}" for item in result.get("material_reading", []))

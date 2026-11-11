@@ -170,27 +170,291 @@ export function initializeShellControls(signal) {
     });
   });
 
-  document.querySelectorAll("[data-coach-api-settings]").forEach((settings) => {
-    const fields = settings.querySelector("[data-coach-api-fields]");
-    const radios = Array.from(settings.querySelectorAll("[name='agent_connection_mode']"));
-    if (!fields || !radios.length) return;
-    const controls = Array.from(fields.querySelectorAll("input, select, textarea, button"));
-    const syncConnectionMode = () => {
-      const expanded = radios.some((radio) => radio.checked && radio.value === "custom");
-      fields.dataset.expanded = String(expanded);
-      fields.setAttribute("aria-hidden", String(!expanded));
-      controls.forEach((control) => {
-        control.disabled = !expanded;
-      });
-    };
-    radios.forEach((radio) => {
-      radio.addEventListener("change", syncConnectionMode, { signal });
-    });
-    syncConnectionMode();
-  });
 }
 
 
+function showNativeDownloadToast(message) {
+  document.querySelector("[data-native-download-toast]")?.remove();
+  const toast = document.createElement("div");
+  toast.className = "native-download-toast";
+  toast.dataset.nativeDownloadToast = "1";
+  toast.setAttribute("role", "status");
+  toast.textContent = message;
+  document.body.append(toast);
+  window.setTimeout(() => toast.remove(), 4200);
+}
+
+function nativeDownloadApi() {
+  const api = window.pywebview?.api;
+  return api && typeof api.download_file === "function" ? api : null;
+}
+
+function waitForNativeDownloadApi(timeoutMs = 1800) {
+  const ready = nativeDownloadApi();
+  if (ready) return Promise.resolve(ready);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = 0;
+    const finish = (api = null) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      window.removeEventListener("pywebviewready", onReady);
+      resolve(api);
+    };
+    const onReady = () => finish(nativeDownloadApi());
+    window.addEventListener("pywebviewready", onReady, { once: true });
+    timer = window.setTimeout(() => finish(nativeDownloadApi()), timeoutMs);
+  });
+}
+
+export function initializeNativeDownloads(signal) {
+  document.querySelectorAll("[data-native-download]").forEach((link) => {
+    link.addEventListener("click", async (event) => {
+      // WKWebView treats a PDF href as a normal navigation even when the
+      // anchor has `download`, which replaces the app page with a blank PDF
+      // view. Always keep the current page in place and hand the request to
+      // the native host once pywebview finishes injecting its API.
+      event.preventDefault();
+      if (link.getAttribute("aria-busy") === "true") return;
+      const href = link.getAttribute("href") || "";
+      const originalText = link.textContent;
+      const label = link.dataset.downloadLabel || "PDF";
+      link.setAttribute("aria-busy", "true");
+      link.classList.add("is-loading");
+      link.textContent = "生成中…";
+      try {
+        const api = await waitForNativeDownloadApi();
+        if (!api) {
+          showNativeDownloadToast("导出接口尚未就绪，请重试");
+          return;
+        }
+        const result = await api.download_file(href);
+        showNativeDownloadToast(
+          result?.ok ? `${label} 已导出：${result.path}` : `导出失败：${result?.error || "未知错误"}`,
+        );
+      } catch (error) {
+        showNativeDownloadToast(`导出失败：${error?.message || error}`);
+      } finally {
+        link.removeAttribute("aria-busy");
+        link.classList.remove("is-loading");
+        link.textContent = originalText;
+      }
+    }, { signal });
+  });
+}
+
+function pageFindTextIndex(root) {
+  const entries = [];
+  let text = "";
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
+      const parent = node.parentElement;
+      if (!parent) return NodeFilter.FILTER_REJECT;
+      if (parent.closest(
+        ".page-find-bar, .sidebar, button, input, select, textarea, label, script, style, "
+        + "[role='button'], [role='tab'], [role='menuitem'], [role='navigation']",
+      )) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  let node = walker.nextNode();
+  while (node) {
+    const start = text.length;
+    text += node.nodeValue;
+    entries.push({ node, start, end: text.length });
+    node = walker.nextNode();
+  }
+  return { text, entries };
+}
+
+function pageFindRange(index, length, entries) {
+  const endIndex = index + length;
+  const startEntry = entries.find((entry) => index >= entry.start && index < entry.end);
+  const endEntry = entries.find((entry) => endIndex > entry.start && endIndex <= entry.end);
+  if (!startEntry || !endEntry) return null;
+  const range = document.createRange();
+  range.setStart(startEntry.node, index - startEntry.start);
+  range.setEnd(endEntry.node, endIndex - endEntry.start);
+  return range;
+}
+
+function revealPageFindRange(range) {
+  const startElement = range.startContainer.parentElement;
+  if (!startElement) return;
+
+  let details = startElement.closest("details");
+  while (details) {
+    details.open = true;
+    details = details.parentElement?.closest("details") || null;
+  }
+
+  const panel = startElement.closest(".tab-panel");
+  if (panel?.hidden && panel.id) {
+    const tabset = panel.closest("[data-tabs]");
+    tabset?.querySelector(`[data-tab-target="${panel.id}"]`)?.click();
+  }
+
+  startElement.scrollIntoView?.({ behavior: "smooth", block: "center", inline: "nearest" });
+}
+
+export function initializePageFind(signal) {
+  const root = document.querySelector(".main");
+  if (!root) return;
+
+  const bar = document.createElement("div");
+  bar.className = "page-find-bar";
+  bar.dataset.pageFind = "1";
+  bar.hidden = true;
+  bar.innerHTML = `
+    <label class="page-find-input-wrap">
+      <span class="sr-only">查找本页文字</span>
+      <input type="search" data-page-find-input autocomplete="off" spellcheck="false" placeholder="查找本页文字…" aria-label="查找本页文字">
+    </label>
+    <span class="page-find-count" data-page-find-count aria-live="polite">0 / 0</span>
+    <button type="button" class="page-find-step" data-page-find-prev aria-label="上一个匹配" title="上一个匹配（Shift+Enter / ⌘⇧G）">↑</button>
+    <button type="button" class="page-find-step" data-page-find-next aria-label="下一个匹配" title="下一个匹配（Enter / ⌘G）">↓</button>
+    <button type="button" class="page-find-close" data-page-find-close aria-label="关闭查找" title="关闭（Esc）">×</button>
+  `;
+  document.body.append(bar);
+
+  const input = bar.querySelector("[data-page-find-input]");
+  const count = bar.querySelector("[data-page-find-count]");
+  const previous = bar.querySelector("[data-page-find-prev]");
+  const next = bar.querySelector("[data-page-find-next]");
+  const close = bar.querySelector("[data-page-find-close]");
+  let matches = [];
+  let current = -1;
+  let currentRange = null;
+
+  const customHighlightsAvailable = Boolean(window.CSS?.highlights && window.Highlight);
+  const clearHighlights = () => {
+    if (customHighlightsAvailable) {
+      window.CSS.highlights.delete("page-find-all");
+      window.CSS.highlights.delete("page-find-current");
+    } else if (currentRange) {
+      const selection = window.getSelection();
+      if (selection?.rangeCount) selection.removeAllRanges();
+    }
+    currentRange = null;
+  };
+
+  const showCurrent = () => {
+    clearHighlights();
+    if (!matches.length || current < 0) {
+      count.textContent = "0 / 0";
+      previous.disabled = true;
+      next.disabled = true;
+      return;
+    }
+    previous.disabled = false;
+    next.disabled = false;
+    current = (current + matches.length) % matches.length;
+    currentRange = matches[current];
+    count.textContent = `${current + 1} / ${matches.length}`;
+    revealPageFindRange(currentRange);
+    if (customHighlightsAvailable) {
+      window.CSS.highlights.set("page-find-all", new window.Highlight(...matches));
+      window.CSS.highlights.set("page-find-current", new window.Highlight(currentRange));
+    } else {
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(currentRange);
+    }
+  };
+
+  const refreshMatches = () => {
+    clearHighlights();
+    matches = [];
+    current = -1;
+    const query = input.value;
+    if (!query) {
+      count.textContent = "0 / 0";
+      previous.disabled = true;
+      next.disabled = true;
+      return;
+    }
+    const index = pageFindTextIndex(root);
+    const haystack = index.text.toLocaleLowerCase();
+    const needle = query.toLocaleLowerCase();
+    let offset = 0;
+    while (offset <= haystack.length - needle.length) {
+      const found = haystack.indexOf(needle, offset);
+      if (found < 0) break;
+      const range = pageFindRange(found, query.length, index.entries);
+      if (range) matches.push(range);
+      offset = found + Math.max(1, needle.length);
+    }
+    if (matches.length) current = 0;
+    showCurrent();
+  };
+
+  const move = (delta) => {
+    if (!input.value) return;
+    if (!matches.length) {
+      refreshMatches();
+      return;
+    }
+    current = (current + delta + matches.length) % matches.length;
+    showCurrent();
+  };
+
+  const openFind = () => {
+    bar.hidden = false;
+    refreshMatches();
+    input.focus({ preventScroll: true });
+    input.select();
+  };
+
+  const closeFind = () => {
+    clearHighlights();
+    matches = [];
+    current = -1;
+    bar.hidden = true;
+  };
+
+  input.addEventListener("input", refreshMatches, { signal });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      move(event.shiftKey ? -1 : 1);
+    }
+  }, { signal });
+  previous.addEventListener("click", () => move(-1), { signal });
+  next.addEventListener("click", () => move(1), { signal });
+  close.addEventListener("click", closeFind, { signal });
+
+  document.addEventListener("keydown", (event) => {
+    const key = event.key.toLocaleLowerCase();
+    const command = event.metaKey || event.ctrlKey;
+    if (command && !event.altKey && key === "f") {
+      event.preventDefault();
+      openFind();
+      return;
+    }
+    if (command && !event.altKey && key === "g") {
+      if (!input.value) return;
+      event.preventDefault();
+      if (bar.hidden) bar.hidden = false;
+      move(event.shiftKey ? -1 : 1);
+      input.focus({ preventScroll: true });
+      return;
+    }
+    if (event.key === "Escape" && !bar.hidden) {
+      event.preventDefault();
+      closeFind();
+    }
+  }, { signal, capture: true });
+
+  signal.addEventListener("abort", () => {
+    clearHighlights();
+    bar.remove();
+  }, { once: true });
+}
 
 
 export function initializeFilters(_signal, navigatePartial) {
@@ -237,6 +501,67 @@ export function initializeFilters(_signal, navigatePartial) {
 
 
 export function initializeTabsAndPagination(signal, _navigatePartial) {
+  const materialFontStorageKey = "gongkao.materialFontSize:v1";
+  const materialFontMin = 14;
+  const materialFontMax = 24;
+  const materialFontStep = 2;
+  let savedMaterialFontSize = 16;
+  try {
+    const stored = Number(window.localStorage.getItem(materialFontStorageKey));
+    if (Number.isFinite(stored) && stored >= materialFontMin && stored <= materialFontMax) {
+      savedMaterialFontSize = stored;
+    }
+  } catch (_error) {
+    // localStorage can be unavailable in restricted webviews; keep the default.
+  }
+
+  document.querySelectorAll("[data-material-font-controls]").forEach((controls) => {
+    const tabset = controls.closest("[data-tabs]");
+    const down = controls.querySelector("[data-material-font-size-down]");
+    const up = controls.querySelector("[data-material-font-size-up]");
+    const value = controls.querySelector("[data-material-font-size-value]");
+    if (!tabset || !down || !up || !value) return;
+
+    let currentSize = savedMaterialFontSize;
+    const applyMaterialFontSize = (nextSize, persist = true) => {
+      currentSize = Math.max(materialFontMin, Math.min(materialFontMax, nextSize));
+      tabset.style.setProperty("--material-font-size", `${currentSize}px`);
+      value.textContent = String(currentSize);
+      down.disabled = currentSize <= materialFontMin;
+      up.disabled = currentSize >= materialFontMax;
+      if (!persist) return;
+      try {
+        window.localStorage.setItem(materialFontStorageKey, String(currentSize));
+      } catch (_error) {
+        // The size still applies for the current page when storage is unavailable.
+      }
+    };
+
+    applyMaterialFontSize(currentSize, false);
+    // Preserve an active text selection on a normal mouse press, but always keep
+    // click as a fallback. WKWebView/AX activation can emit click without first
+    // delivering mousedown; filtering click by event.detail made those presses a
+    // no-op. A per-button flag only suppresses the click that follows a handled
+    // mousedown, so both native pointer and accessibility activation work.
+    const bindMaterialFontButton = (button, delta) => {
+      let suppressFollowingClick = false;
+      button.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        suppressFollowingClick = true;
+        applyMaterialFontSize(currentSize + delta);
+      }, { signal });
+      button.addEventListener("click", () => {
+        if (suppressFollowingClick) {
+          suppressFollowingClick = false;
+          return;
+        }
+        applyMaterialFontSize(currentSize + delta);
+      }, { signal });
+    };
+    bindMaterialFontButton(down, -materialFontStep);
+    bindMaterialFontButton(up, materialFontStep);
+  });
+
   document.querySelectorAll("[data-tabs]").forEach((tabset) => {
     const tabs = Array.from(tabset.querySelectorAll("[role='tab']"));
     const activate = (tab) => {

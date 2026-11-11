@@ -43,18 +43,42 @@ GET_ROUTE_GROUPS = {
         Route("page_index", exact="/", arguments="query"),
         Route("page_papers", exact="/papers", arguments="query"),
         Route("page_favorites", exact="/favorites", arguments="query"),
+        Route("export_paper_pdf", prefix="/papers/", suffix="/export.pdf", arguments="path"),
         Route("page_paper_detail", prefix="/papers/", arguments="path_query"),
         Route("page_question_by_code", prefix="/questions/by-code/", arguments="path_query"),
+        Route("export_question_pdf", prefix="/questions/", suffix="/export.pdf", arguments="path"),
         Route("blank_package", prefix="/questions/", suffix="/package.md", arguments="path"),
+        Route("blank_package_zip", prefix="/questions/", suffix="/package.zip", arguments="path"),
         Route("page_question", prefix="/questions/", arguments="path_query"),
         Route("page_coverage", exact="/coverage", arguments="query"),
     ),
     "learning": (
+        Route("page_mistakes", exact="/mistakes", arguments="query"),
         Route("page_notes", exact="/notes", arguments="query"),
         Route("page_statistics", exact="/statistics", arguments="query"),
         Route("attempt_package", prefix="/attempts/", suffix="/package.md", arguments="path"),
+        Route("attempt_package_zip", prefix="/attempts/", suffix="/package.zip", arguments="path"),
         Route("page_attempts", exact="/attempts", arguments="query"),
         Route("page_attempt_detail", prefix="/attempts/", arguments="path_query"),
+    ),
+    "political_quiz": (
+        Route("page_political_quiz", exact="/political-quiz", arguments="query"),
+        Route(
+            "handle_political_quiz_generation_status",
+            prefix="/political-quiz/generation-jobs/",
+            suffix="/status",
+            arguments="path",
+        ),
+        Route("page_political_quiz_pack", prefix="/political-quiz/packs/", arguments="path_query"),
+    ),
+    "idioms": (
+        Route("page_idioms", exact="/idioms", arguments="query"),
+        Route("page_idiom_data", exact="/idioms/data", arguments="query"),
+        Route("page_idiom_quiz_data", exact="/idioms/quiz-data", arguments="query"),
+    ),
+    "normative_expressions": (
+        Route("page_normative_expressions", exact="/normative-expressions", arguments="query"),
+        Route("export_normative_expressions", exact="/normative-expressions/export.md"),
     ),
     "agent": (
         Route("page_agent", exact="/agent", arguments="query"),
@@ -84,6 +108,7 @@ GET_ROUTE_GROUPS = {
         Route("page_import", exact="/import"),
         Route("handle_settings_export", exact="/settings/export", arguments="query"),
         Route("handle_settings_index_status", exact="/settings/index-status"),
+        Route("handle_codex_status", exact="/settings/codex-status"),
         Route("page_settings_local_records", exact="/settings/local-records"),
         Route("page_settings", exact="/settings"),
     ),
@@ -91,12 +116,41 @@ GET_ROUTE_GROUPS = {
 
 
 POST_ROUTE_GROUPS = {
+    "political_quiz": (
+        Route("handle_political_quiz_generate", exact="/political-quiz/generate"),
+        Route(
+            "handle_political_quiz_verify",
+            prefix="/political-quiz/packs/",
+            suffix="/verify",
+            arguments="path",
+        ),
+        Route(
+            "handle_political_quiz_submit",
+            prefix="/political-quiz/attempts/",
+            suffix="/submit",
+            arguments="path",
+        ),
+        Route("handle_political_quiz_attempt", prefix="/political-quiz/attempts/", arguments="path"),
+    ),
+    "mistakes": (
+        Route("handle_mistake_update", exact="/mistakes/update"),
+    ),
+    "idioms": (
+        Route("handle_idiom_progress", exact="/idioms/progress"),
+    ),
+    "normative_expressions": (
+        Route("handle_normative_expression_sync", exact="/normative-expressions/sync"),
+        Route("handle_normative_expression_add", exact="/normative-expressions/add"),
+        Route("handle_normative_expression_update", exact="/normative-expressions/update"),
+    ),
     "settings": (
         Route("handle_import", exact="/import"),
         Route("handle_text_annotations", exact="/annotations"),
         Route("handle_settings_import", exact="/settings/import"),
         Route("handle_settings_local_records_clear", exact="/settings/local-records/clear"),
         Route("handle_settings_local_records_open", exact="/settings/local-records/open"),
+        Route("handle_codex_login", exact="/settings/codex-login"),
+        Route("handle_workbuddy_test", exact="/settings/workbuddy-test"),
         Route("handle_settings", exact="/settings"),
     ),
     "agent": (
@@ -157,6 +211,7 @@ POST_ROUTE_GROUPS = {
             suffix="/grading-references",
             arguments="path",
         ),
+        Route("handle_import_report", prefix="/attempts/", suffix="/reports/import", arguments="path"),
         Route("handle_save_report", prefix="/attempts/", suffix="/reports", arguments="path"),
         Route("handle_api_grade", prefix="/attempts/", suffix="/grade", arguments="path"),
     ),

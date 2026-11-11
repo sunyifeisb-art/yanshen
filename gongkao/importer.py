@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import html
 import io
 import json
 import re
@@ -8,7 +9,7 @@ import zipfile
 from pathlib import Path
 
 from .organizations import canonicalize_organization
-from .taxonomy import classify_question_type
+from .taxonomy import classify_question_type, derive_question_title
 
 QUESTION_ALIASES = {
     "question_code": ["题目编号", "编号", "question_code", "code"],
@@ -149,6 +150,77 @@ def _content_hash(row):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+TITLE_PLACEHOLDER = re.compile(r"第?\s*\d+\s*题")
+
+WORD_LIMIT_PATTERN = re.compile(
+    r"(?:\d+\s*字\s*左右|(?:不超过|不多于|不少于|字数在)\s*\d+(?:\s*[-—至到]\s*\d+)?\s*字(?:以内|左右)?)"
+)
+
+
+def infer_word_limit(raw):
+    """Pull the stated length requirement out of a prompt.
+
+    Banks usually bury "不超过 200 字" inside 要求 instead of filling a separate
+    column, so imports without an explicit word_limit still get a usable budget.
+    """
+    match = WORD_LIMIT_PATTERN.search(raw or "")
+    return match.group(0) if match else ""
+
+
+def _prompt_fingerprint(prompt):
+    """Reduce a prompt to its comparable core so re-imports match across sources.
+
+    Different sources add scoring hints, rename "给定资料3" to "材料3", and vary
+    punctuation, so comparing raw text reports the same question as new. Keeping
+    only the question sentence before 要求 plus Chinese and alphanumerics makes
+    the same question collapse to the same digest.
+    """
+    text = html.unescape(prompt or "")
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.split(r"要求\s*[:：]", text)[0]
+    text = re.sub(r"[（(]\s*\d+\s*分\s*[)）]", "", text)
+    for word in ("给定资料", "给定材料", "材料", "资料"):
+        text = re.sub(
+            word + r"\s*[0-9一二三四五六七八九十百零〇两\-—~至到]+", "给定资料", text
+        )
+    text = re.sub(r"[^\u4e00-\u9fa5a-zA-Z0-9]", "", text)
+    return hashlib.sha1(text.encode("utf-8")).hexdigest() if text else ""
+
+
+def _find_existing_question(conn, row, index):
+    """Locate a question already stored under another code.
+
+    A bank arrives with its own numbering (SRNZ-…, GKS-…, or a publisher's), so
+    keying identity on question_code alone duplicates every re-import. Match the
+    fingerprint of the normalised prompt instead.
+    """
+    found = conn.execute(
+        "SELECT id, question_code FROM questions WHERE content_hash = ? LIMIT 1",
+        (_content_hash(row),),
+    ).fetchone()
+    if found:
+        return found
+    key = _prompt_fingerprint(row.get("prompt", ""))
+    if not key:
+        return None
+    hit = index.get(key)
+    if hit is None:
+        return None
+    return conn.execute(
+        "SELECT id, question_code FROM questions WHERE id = ?", (hit,)
+    ).fetchone()
+
+
+def _fingerprint_index(conn):
+    """Map every stored prompt to its question id, built once per import."""
+    index = {}
+    for row in conn.execute("SELECT id, prompt FROM questions WHERE prompt <> ''"):
+        key = _prompt_fingerprint(row["prompt"])
+        if key and key not in index:
+            index[key] = row["id"]
+    return index
+
+
 def _ensure_paper(conn, row, year, relevance):
     paper_name = row.get("paper_name") or f"{year}{row['region']}{row['exam_type']}未分卷"
     normalized = dict(row)
@@ -216,17 +288,19 @@ def import_questions(conn, file_storage, import_id):
     errors = []
     imported = 0
     updated = 0
+    skipped = 0
+    index = _fingerprint_index(conn)
 
-    for index, raw in enumerate(rows, start=2):
+    for index_no, raw in enumerate(rows, start=2):
         row = _normalize_row(raw, QUESTION_ALIASES)
         missing = [name for name in QUESTION_REQUIRED if not row.get(name)]
         if missing:
-            errors.append(f"题目表第 {index} 行缺少必填字段: {', '.join(missing)}")
+            errors.append(f"题目表第 {index_no} 行缺少必填字段: {', '.join(missing)}")
             continue
 
         year = _as_int(row["year"])
         if year <= 0:
-            errors.append(f"题目表第 {index} 行年份无效: {row['year']}")
+            errors.append(f"题目表第 {index_no} 行年份无效: {row['year']}")
             continue
 
         relevance = max(1, min(5, _as_int(row.get("zhejiang_relevance"), 3)))
@@ -235,12 +309,32 @@ def import_questions(conn, file_storage, import_id):
             row["requirements"],
             fallback=row["question_type"],
         )[0]
-        paper_id = _ensure_paper(conn, row, year, relevance)
-        _upsert_materials(conn, paper_id, {**raw, **row})
+        row["title"] = derive_question_title(row["title"], row["prompt"])
+        row["word_limit"] = row.get("word_limit") or infer_word_limit(
+            row["prompt"] + " " + row["requirements"]
+        )
         existing = conn.execute(
             "SELECT id FROM questions WHERE question_code = ?",
             (row["question_code"],),
         ).fetchone()
+        if not existing:
+            duplicate = _find_existing_question(conn, row, index)
+            if duplicate:
+                # Same question from another source keeps its own code as an
+                # alias, so this import's answer sheet can still reach it.
+                conn.execute(
+                    """
+                    INSERT INTO question_code_aliases (alias_code, question_id)
+                    VALUES (?, ?)
+                    ON CONFLICT(alias_code) DO UPDATE SET
+                        question_id = excluded.question_id
+                    """,
+                    (row["question_code"], duplicate["id"]),
+                )
+                skipped += 1
+                continue
+        paper_id = _ensure_paper(conn, row, year, relevance)
+        _upsert_materials(conn, paper_id, {**raw, **row})
         if existing:
             conn.execute(
                 """
@@ -317,7 +411,7 @@ def import_questions(conn, file_storage, import_id):
             )
             imported += 1
 
-    return {"imported": imported, "updated": updated, "errors": errors}
+    return {"imported": imported, "updated": updated, "skipped": skipped, "errors": errors}
 
 
 def import_answers(conn, file_storage, import_id):
@@ -334,8 +428,13 @@ def import_answers(conn, file_storage, import_id):
             continue
 
         question = conn.execute(
-            "SELECT id FROM questions WHERE question_code = ?",
-            (row["question_code"],),
+            """
+            SELECT id FROM questions WHERE question_code = ?
+            UNION ALL
+            SELECT question_id AS id FROM question_code_aliases WHERE alias_code = ?
+            LIMIT 1
+            """,
+            (row["question_code"], row["question_code"]),
         ).fetchone()
         if not question:
             errors.append(f"答案表第 {index} 行找不到题目编号: {row['question_code']}")

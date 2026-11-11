@@ -7,3 +7,4 @@ sqlite-vec==0.1.9
 fastembed==0.8.0
 pydantic>=2.7,<3
 pywebview==6.2.1
+reportlab>=5.0,<6

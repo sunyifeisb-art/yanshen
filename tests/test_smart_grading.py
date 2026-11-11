@@ -166,6 +166,14 @@ class SmartGradingTest(unittest.TestCase):
                         {"dimension": "expression", "score": 10, "reason": "表达准确。"},
                         {"dimension": "format", "score": 5, "reason": "符合要求。"},
                     ],
+                    "structure_review": {
+                        "expected_outline": ["办事便利", "查询及时"],
+                        "answer_outline": ["办事便利", "查询及时"],
+                        "comparison": "原答案顺序与材料及两份参考答案的共性顺序一致。",
+                        "verdict": "合理",
+                        "issues": [],
+                        "score_reason": "两个并列变化按材料顺序表达，未出现层级混淆。",
+                    },
                     "holistic_adjustment_reason": "",
                     "annotations": [],
                     "reference_fusion": "两家机构共同支持两个要点。",
@@ -193,7 +201,7 @@ class SmartGradingTest(unittest.TestCase):
             with connect(path) as conn:
                 attempt = conn.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
                 settings = conn.execute("SELECT * FROM ai_settings WHERE id = 1").fetchone()
-                self.assertEqual(settings["grading_mode"], "basic")
+                self.assertEqual(settings["grading_mode"], "enhanced")
                 job, _ = create_grading_job(conn, attempt, settings, reference_ids, "", {})
             with patch(
                 "gongkao.grading_pipeline.orchestration.retrieve_grading_evidence",
@@ -241,6 +249,48 @@ class SmartGradingTest(unittest.TestCase):
             self.assertEqual(
                 [item["purpose"] for item in second_validation["api_calls"]],
                 ["grading"],
+            )
+
+    def test_semantically_invalid_rubric_gets_evidence_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _, attempt_id, reference_ids = self.make_database(directory)
+            calls = []
+            base_chat = self.fake_chat(reference_ids, [])
+
+            def chat(settings, prompt, request_options=None):
+                calls.append(prompt)
+                response, raw = base_chat(settings, prompt, request_options)
+                if len(calls) == 1:
+                    rubric = json.loads(response.split("<rubric_json>", 1)[1].split("</rubric_json>", 1)[0])
+                    for point in rubric["points"]:
+                        point["tier"] = "supporting"
+                        point["required_for_full_score"] = False
+                    response = f"<rubric_json>{json.dumps(rubric, ensure_ascii=False)}</rubric_json>"
+                    raw = response
+                return response, raw
+
+            with connect(path) as conn:
+                attempt = conn.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+                settings = conn.execute("SELECT * FROM ai_settings WHERE id = 1").fetchone()
+                job, _ = create_grading_job(conn, attempt, settings, reference_ids, "", {})
+            with patch(
+                "gongkao.grading_pipeline.orchestration.retrieve_grading_evidence",
+                return_value=([], {"history_attempt_count": 0, "history_stable": False}),
+            ):
+                report_id = run_grading_job(path, job["id"], chat)
+
+            self.assertIsNotNone(report_id)
+            self.assertEqual(len(calls), 3)
+            self.assertIn("评分基准没有通过材料校验的有效采分点", calls[1])
+            self.assertIn("修正计分点本身", calls[1])
+            with connect(path) as conn:
+                validation = json.loads(conn.execute(
+                    "SELECT validation_json FROM grading_report_contexts WHERE report_id = ?",
+                    (report_id,),
+                ).fetchone()[0])
+            self.assertEqual(
+                [item["purpose"] for item in validation["api_calls"]],
+                ["rubric_generation", "rubric_repair", "grading"],
             )
 
     def test_consensus_preprocessing_never_starts_dense_model_and_bounds_materials(self):
@@ -356,7 +406,7 @@ class SmartGradingTest(unittest.TestCase):
             def overflowing_chat(settings, prompt, request_options=None):
                 if "上一版超限报告如下" in prompt:
                     calls.append(prompt)
-                    return f"<revised_answer>{'乙' * 250}</revised_answer>", "repair-raw"
+                    return f"<revised_answer>{'乙' * 251}</revised_answer>", "repair-raw"
                 text, raw = base_chat(settings, prompt, request_options)
                 if "<smart_grading_json>" in text:
                     payload = json.loads(
@@ -364,7 +414,7 @@ class SmartGradingTest(unittest.TestCase):
                             "</smart_grading_json>", 1
                         )[0]
                     )
-                    payload["evaluation"]["revised_answer"] = "甲" * 250
+                    payload["evaluation"]["revised_answer"] = "甲" * 251
                     text = f"<smart_grading_json>{json.dumps(payload, ensure_ascii=False)}</smart_grading_json>"
                     raw = text
                 return text, raw
@@ -396,7 +446,7 @@ class SmartGradingTest(unittest.TestCase):
             self.assertEqual(failed_job["report_id"], report_id)
             self.assertIsNotNone(saved_report)
             self.assertEqual(saved_report["status"], "ok")
-            self.assertIn("乙" * 250, saved_report["report_text"])
+            self.assertIn("乙" * 251, saved_report["report_text"])
             self.assertTrue(validation["word_count_status"]["over_limit"])
             self.assertEqual(
                 [item["purpose"] for item in validation["api_calls"]],
@@ -405,6 +455,59 @@ class SmartGradingTest(unittest.TestCase):
             payload = grading_job_payload(failed_job)
             self.assertFalse(payload["preview_available"])
             self.assertEqual(payload["report_id"], report_id)
+
+    def test_local_revision_is_compressed_before_using_global_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _, attempt_id, reference_ids = self.make_database(directory)
+            calls = []
+            base_chat = self.fake_chat(reference_ids, [])
+            original = "数字平台让村民办事更加方便，政策查询更加及时。" * 4
+            localized = original + "仍需进一步完善服务。" * 20
+            compressed = original + "继续完善服务。"
+
+            def chat(settings, prompt, request_options=None):
+                calls.append(prompt)
+                if "上一版修改稿改写了大部分考生原文" in prompt:
+                    response = f"<revised_answer>{localized}</revised_answer>"
+                    return response, response
+                if "上一版超限报告如下" in prompt:
+                    response = f"<revised_answer>{compressed}</revised_answer>"
+                    return response, response
+                response, raw = base_chat(settings, prompt, request_options)
+                if "<smart_grading_json>" in response:
+                    payload = json.loads(response.split("<smart_grading_json>", 1)[1].split("</smart_grading_json>", 1)[0])
+                    payload["evaluation"]["revised_answer"] = "甲" * 260
+                    response = f"<smart_grading_json>{json.dumps(payload, ensure_ascii=False)}</smart_grading_json>"
+                    raw = response
+                return response, raw
+
+            with connect(path) as conn:
+                conn.execute("UPDATE attempts SET answer_text = ? WHERE id = ?", (original, attempt_id))
+                attempt = conn.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+                settings = conn.execute("SELECT * FROM ai_settings WHERE id = 1").fetchone()
+                job, _ = create_grading_job(conn, attempt, settings, reference_ids, "", {})
+            with patch(
+                "gongkao.grading_pipeline.orchestration.retrieve_grading_evidence",
+                return_value=([], {"history_attempt_count": 0, "history_stable": False}),
+            ):
+                report_id = run_grading_job(path, job["id"], chat)
+
+            self.assertIsNotNone(report_id)
+            self.assertEqual(len(calls), 4)
+            self.assertIn("原答案占用", calls[2])
+            with connect(path) as conn:
+                context = conn.execute(
+                    "SELECT result_json, validation_json FROM grading_report_contexts WHERE report_id = ?",
+                    (report_id,),
+                ).fetchone()
+            result = json.loads(context["result_json"])
+            validation = json.loads(context["validation_json"])
+            self.assertEqual(result["revised_answer"], compressed)
+            self.assertFalse(validation["word_count_status"]["over_limit"])
+            self.assertEqual(
+                [item["purpose"] for item in validation["api_calls"]],
+                ["rubric_generation", "grading", "revised_answer_local_edit", "revised_answer_local_compression"],
+            )
 
     def test_failed_preview_polling_forces_server_render_reload(self):
         script = read_static_scripts(ROOT)
@@ -497,6 +600,108 @@ class SmartGradingTest(unittest.TestCase):
         self.assertEqual(result["point_matches"][0]["evidence_status"], "unresolved")
         self.assertEqual(result["score_status"], "provisional")
 
+    def test_partial_matches_are_quantized_to_exam_grading_bands(self):
+        rubric = {
+            "question_type": "归纳概括",
+            "display_max_score": 20,
+            "points": [
+                {"point_key": "p-high", "weight": 30, "importance": "major", "label": "高覆盖"},
+                {"point_key": "p-mid", "weight": 20, "importance": "major", "label": "中覆盖"},
+                {"point_key": "p-low", "weight": 20, "importance": "major", "label": "低覆盖"},
+            ],
+        }
+        result = validate_grading_result(
+            {
+                "point_matches": [
+                    {"point_key": "p-high", "status": "partial", "coverage_ratio": 0.9, "answer_quote": "甲", "reason": "大部分覆盖"},
+                    {"point_key": "p-mid", "status": "partial", "coverage_ratio": 0.6, "answer_quote": "乙", "reason": "约一半覆盖"},
+                    {"point_key": "p-low", "status": "partial", "coverage_ratio": 0.2, "answer_quote": "丙", "reason": "仅弱相关"},
+                ],
+                "dimension_scores": [
+                    {"dimension": "content", "score": 70, "reason": "模型原始内容分"},
+                    {"dimension": "structure", "score": 0, "reason": ""},
+                    {"dimension": "expression", "score": 0, "reason": ""},
+                    {"dimension": "format", "score": 0, "reason": ""},
+                ],
+            },
+            rubric,
+            "甲乙丙",
+            [],
+        )
+        coverage_by_key = {match["point_key"]: match["coverage_ratio"] for match in result["point_matches"]}
+        self.assertEqual(coverage_by_key, {"p-high": 0.75, "p-mid": 0.5, "p-low": 0.25})
+
+    def test_critical_miss_caps_point_based_content_score(self):
+        rubric = {
+            "question_type": "归纳概括",
+            "display_max_score": 20,
+            "points": [
+                {"point_key": "p-hit", "weight": 65, "importance": "major", "label": "已命中"},
+                {"point_key": "p-critical", "weight": 5, "importance": "critical", "label": "关键遗漏"},
+            ],
+        }
+        result = validate_grading_result(
+            {
+                "point_matches": [
+                    {"point_key": "p-hit", "status": "hit", "coverage_ratio": 1, "answer_quote": "完整命中", "reason": "命中"},
+                    {"point_key": "p-critical", "status": "miss", "coverage_ratio": 0, "answer_quote": "", "reason": "遗漏"},
+                ],
+                "dimension_scores": [
+                    {"dimension": "content", "score": 70, "reason": "模型原始内容分"},
+                    {"dimension": "structure", "score": 0, "reason": ""},
+                    {"dimension": "expression", "score": 0, "reason": ""},
+                    {"dimension": "format", "score": 0, "reason": ""},
+                ],
+            },
+            rubric,
+            "完整命中",
+            [],
+        )
+        self.assertEqual(result["weighted_coverage_score"], 65.0)
+        self.assertEqual(result["content_score"], 59.5)
+        self.assertEqual(result["content_score_cap"]["ratio"], 0.85)
+
+    def test_positive_calibration_never_breaks_critical_content_cap(self):
+        rubric = {
+            "question_type": "归纳概括",
+            "display_max_score": 20,
+            "points": [
+                {"point_key": "p-hit", "weight": 65, "importance": "major", "label": "已命中"},
+                {"point_key": "p-critical", "weight": 5, "importance": "critical", "label": "关键遗漏"},
+            ],
+        }
+        policy = {
+            "policy_version": "exam-anchor-calibration-v1",
+            "enabled": True,
+            "anchor_count": 8,
+            "offset": 3.0,
+            "max_adjustment": 3.0,
+            "applicable_band": [65, 100],
+            "reason": "test",
+        }
+        result = validate_grading_result(
+            {
+                "point_matches": [
+                    {"point_key": "p-hit", "status": "hit", "answer_quote": "完整命中", "reason": "命中"},
+                    {"point_key": "p-critical", "status": "miss", "answer_quote": "", "reason": "遗漏"},
+                ],
+                "dimension_scores": [
+                    {"dimension": "content", "score": 70, "reason": ""},
+                    {"dimension": "structure", "score": 15, "reason": ""},
+                    {"dimension": "expression", "score": 10, "reason": ""},
+                    {"dimension": "format", "score": 5, "reason": ""},
+                ],
+            },
+            rubric,
+            "完整命中",
+            [],
+            calibration_policy=policy,
+        )
+        content = next(item for item in result["dimension_scores"] if item["dimension"] == "content")
+        self.assertLessEqual(content["score"], 59.5)
+        self.assertEqual(result["content_score"], 59.5)
+        self.assertAlmostEqual(result["score"], sum(item["score"] for item in result["dimension_scores"]), places=1)
+
     def test_partial_matches_use_ai_coverage_instead_of_fixed_half(self):
         rubric = {
             "question_type": "归纳概括",
@@ -530,7 +735,90 @@ class SmartGradingTest(unittest.TestCase):
         self.assertEqual(match["coverage_ratio"], 0.75)
         self.assertEqual(result["weighted_coverage_score"], 52.5)
         self.assertEqual(result["display_score"], 5.0)
-        self.assertIn("部分命中（覆盖75%）", render_grading_report(result, rubric, []))
+        report = render_grading_report(result, rubric, [])
+        self.assertIn("## 遗漏点分析", report)
+        self.assertIn("基本命中，仍缺25%核心语义", report)
+        self.assertNotIn("部分命中（覆盖75%）", report)
+
+    def test_omission_report_hides_hit_points_and_shows_material_reason_and_advice(self):
+        rubric = {
+            "question_type": "归纳概括",
+            "display_max_score": 20,
+            "points": [
+                {
+                    "point_key": "p-hit",
+                    "weight": 20,
+                    "label": "已命中要点",
+                    "minimum_expression": "完整写法一",
+                    "material_evidence": [{"material_number": 1, "quote": "命中材料原文"}],
+                },
+                {
+                    "point_key": "p-partial",
+                    "weight": 25,
+                    "label": "部分遗漏要点",
+                    "minimum_expression": "补足对象和结果",
+                    "material_evidence": [{"material_number": 2, "quote": "部分遗漏材料原文"}],
+                },
+                {
+                    "point_key": "p-miss",
+                    "weight": 25,
+                    "label": "完全遗漏要点",
+                    "minimum_expression": "补写完整机制",
+                    "material_evidence": [{"material_number": 3, "quote": "完全遗漏材料原文"}],
+                },
+            ],
+        }
+        result = validate_grading_result(
+            {
+                "point_matches": [
+                    {
+                        "point_key": "p-hit",
+                        "status": "hit",
+                        "coverage_ratio": 1,
+                        "answer_quote": "命中答案原文",
+                        "reason": "完整覆盖",
+                    },
+                    {
+                        "point_key": "p-partial",
+                        "status": "partial",
+                        "coverage_ratio": 0.6,
+                        "answer_quote": "部分内容",
+                        "reason": "只覆盖部分语义",
+                        "missing_elements": ["对象", "结果"],
+                        "omission_reason": "只写了上位做法，材料中的对象和结果被压缩掉。",
+                        "omission_suggestion": "保留上位概括，同时补回对象和结果。",
+                    },
+                    {
+                        "point_key": "p-miss",
+                        "status": "miss",
+                        "coverage_ratio": 0,
+                        "answer_quote": "",
+                        "reason": "原答案未体现",
+                        "omission_reason": "答案按前一主题归并后，没有单列这一独立机制。",
+                        "omission_suggestion": "新增独立分点，写明完整机制。",
+                    },
+                ],
+                "dimension_scores": [
+                    {"dimension": "content", "score": 35, "reason": "有遗漏"},
+                    {"dimension": "structure", "score": 15, "reason": "结构清楚"},
+                    {"dimension": "expression", "score": 10, "reason": "表达准确"},
+                    {"dimension": "format", "score": 5, "reason": "格式规范"},
+                ],
+            },
+            rubric,
+            "命中答案原文。部分内容。",
+            [],
+        )
+        report = render_grading_report(result, rubric, [])
+        omission_section = report.split("## 遗漏点分析", 1)[1].split("## 材料领读", 1)[0]
+        self.assertNotIn("已命中要点", omission_section)
+        self.assertIn("部分遗漏要点（部分命中，仍缺50%核心语义）", omission_section)
+        self.assertIn("材料2：“部分遗漏材料原文”", omission_section)
+        self.assertIn("只写了上位做法，材料中的对象和结果被压缩掉。", omission_section)
+        self.assertIn("保留上位概括，同时补回对象和结果。", omission_section)
+        self.assertIn("完全遗漏要点", omission_section)
+        self.assertIn("材料3：“完全遗漏材料原文”", omission_section)
+        self.assertIn("新增独立分点，写明完整机制。", omission_section)
 
     def test_rubric_makes_non_requested_overall_effect_optional(self):
         materials = [{"material_number": 1, "content": "建立夜话机制，密切干群关系，形成良好示范效应。"}]
@@ -596,9 +884,9 @@ class SmartGradingTest(unittest.TestCase):
         self.assertIn("required_for_full_score", rubric_prompt)
         self.assertIn("optional_details", rubric_prompt)
         self.assertIn("coverage_ratio", grading_prompt)
-        self.assertIn("不得把所有 partial 机械写成0.5", grading_prompt)
-        self.assertIn("修改版答案目标为 315—336 格", grading_prompt)
-        self.assertIn("最终结果必须严格低于 350 格", grading_prompt)
+        self.assertIn("基本命中75%、部分命中50%、弱命中25%", grading_prompt)
+        self.assertIn("修改版答案目标为 315—336 字", grading_prompt)
+        self.assertIn("最终结果不得超过 350 字", grading_prompt)
         self.assertIn("符合真实考场阅卷强度的“得分制”", grading_prompt)
         self.assertIn("普通“写到了”不能进入此档", grading_prompt)
         self.assertIn('"max_score": 70.0', grading_prompt)

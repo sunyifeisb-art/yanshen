@@ -1,17 +1,23 @@
 """Grading workflow and report controllers."""
 
+import cgi
+
 from ...answer_formatting import normalize_answer_format_json
+from ...grading_pipeline.essay_outline import hide_legacy_essay_scores
+from ...normative_expressions import ingest_report_normative_expressions
 from ..runtime import (
     ACTIVE_JOB_STATUSES,
     AiConfigError,
     AiRequestError,
     annotation_data_attributes,
+    append_smart_annotations,
     apply_report_feedback,
     attempt_grading_references,
     build_ai_prompt,
     build_grading_package,
     build_revised_answer_retry_prompt,
     chat_completion,
+    compact_revised_answer_linebreaks,
     connect,
     count_cjk_chars,
     create_grading_job,
@@ -33,6 +39,8 @@ from ..runtime import (
     next_question_path,
     nonnegative_int,
     normalize_revised_answer_word_count,
+    paper_material_annotations,
+    parse_imported_grading_report,
     parse_qs,
     parse_revised_answer_repair,
     pre,
@@ -41,15 +49,22 @@ from ..runtime import (
     report_answer_snapshot,
     return_path_from_form,
     return_path_from_query,
+    revised_answer_body,
     revised_answer_word_count_status,
     rubric_cache_status,
     save_attempt_grading_references,
     select_relevant_materials,
+    split_revised_answer_section,
     start_grading_job,
     tabbed_materials,
     tabbed_references,
     workflow_header,
 )
+
+# 基础批改（单次调用路径）的压缩重试上限。
+# 智能批改有 MAX_MODEL_CALLS 预算，基础批改没有 run_state，
+# 但同样不能只压一轮就收工：超限稿会原样入库。
+BASIC_GRADING_COMPRESSION_CALLS = 6
 
 
 class GradingController:
@@ -99,12 +114,12 @@ class GradingController:
             annotations = conn.execute(
                 """
                 SELECT * FROM text_annotations
-                 WHERE (target_type = 'material' AND question_id = ?)
-                    OR (target_type IN ('answer', 'note') AND attempt_id = ?)
+                 WHERE target_type IN ('answer', 'note') AND attempt_id = ?
                 """,
-                (question["id"], attempt_id),
+                (attempt_id,),
             ).fetchall()
-        return attempt, question, refs, materials, reports, settings, annotations
+            material_annotations = paper_material_annotations(conn, question["paper_id"])
+        return attempt, question, refs, materials, reports, settings, annotations, material_annotations
 
     def page_attempt_detail(self, path, query=None, flashes=None, preview_report=None):
         if flashes is None and isinstance(query, list):
@@ -119,7 +134,8 @@ class GradingController:
         if not context:
             self.send_error(404)
             return
-        attempt, question, refs, materials, reports, settings, annotations = context
+        attempt, question, refs, materials, reports, settings, annotations, material_annotations = context
+        essay_outline_mode = question["question_type"] == "综合写作"
         query = query or {}
         back_href = f"/questions/{question['id']}"
         report_parent_return = return_path_from_query(query, back_href)
@@ -198,19 +214,20 @@ class GradingController:
             grading_basis,
         )
         package_basis_note = (
+            "大作文按题目与整卷材料独立审阅；导出包要求联网检索范文，机构参考答案不参与判断。"
+            if essay_outline_mode else
             "当前批改包已包含智能批改生成并经材料引文校验的 AI 评分基准。"
             if cache_info["cached"]
             else "本题尚未生成 AI 智能评分基准。批改包不会再导出本地聚类候选；Codex 会依据题目、材料和参考答案重新提炼采分点。"
         )
         refs_html = tabbed_references(refs, f"attempt-{attempt_id}")
-        material_annotations = {row["material_number"]: row for row in annotations if row["target_type"] == "material"}
         annotation_by_type = {
             row["target_type"]: row for row in annotations if row["target_type"] in {"answer", "note"}
         }
         materials_html = tabbed_materials(
             relevant_materials,
             f"attempt-{attempt_id}",
-            highlight_scope=f"question-{question['id']}",
+            highlight_scope=f"paper-{question['paper_id']}",
             question_id=question["id"],
             saved_annotations=material_annotations,
         )
@@ -229,8 +246,26 @@ class GradingController:
               </label>""")
         if not reference_options:
             reference_options.append('<p class="muted reference-empty">本题暂无现有参考答案，可在下方自行补充。</p>')
+        def is_imported_report(row):
+            return row["provider"] == "外部导入" and row["model"] == "imported-md"
+
+        imported_report_total = sum(1 for row in reports if is_imported_report(row))
+        software_report_total = len(reports) - imported_report_total
+        imported_seen = software_seen = 0
+        report_tabs = []
         reports_html = []
-        for report in reports:
+        for report_index, report in enumerate(reports):
+            imported_report = is_imported_report(report)
+            if imported_report:
+                imported_seen += 1
+                tab_label = "导入批改报告" if imported_report_total == 1 else f"导入批改报告 {imported_seen}"
+            else:
+                software_seen += 1
+                tab_label = "软件批改报告" if software_report_total == 1 else f"软件批改报告 {software_seen}"
+            report_tabs.append(
+                f'<button class="grading-report-tab{" is-active" if report_index == 0 else ""}" '
+                f'type="button" data-report-target="report-{report["id"]}">{esc(tab_label)}</button>'
+            )
             report_return_to = grading_report_return_path(
                 attempt_id,
                 report["id"],
@@ -241,6 +276,8 @@ class GradingController:
                 question["word_limit"] or "",
             )
             display_report_text = hide_internal_score_calibration(display_report_text)
+            if essay_outline_mode and "## 题意与文章判断" not in display_report_text:
+                display_report_text = hide_legacy_essay_scores(display_report_text)
             report_word_status = revised_answer_word_count_status(
                 display_report_text,
                 question["word_limit"] or "",
@@ -250,7 +287,8 @@ class GradingController:
             if report_word_status["over_limit"]:
                 report_word_warning = f"""
                 <div class="report-preview-warning report-word-limit-warning" role="alert">
-                  <div><strong>修改版答案超出字数限制 {report_word_status["over_by"]} 字</strong><span>当前 {report_word_status["actual_chars"]} 字 · 应低于 {report_word_status["max_chars"]} 字</span></div>
+                  <div><strong>修改版答案超出字数限制 {report_word_status["over_by"]} 格</strong><span>占格 {report_word_status["actual_chars"]}/{report_word_status["max_chars"]} 格 · {report_word_status["lines"]}/{report_word_status["max_lines"]} 行</span></div>
+                  <p>AI 修改稿实写 {report_word_status["written_cells"]} 格，换行留空 {report_word_status["unused_cells"]} 格；此提示不针对你的原答案。</p>
                 </div>"""
             context_row = report_contexts.get(report["id"])
             smart_context_html = ""
@@ -264,7 +302,7 @@ class GradingController:
                     validation = json.loads(context_row["validation_json"] or "{}")
                 except (TypeError, json.JSONDecodeError):
                     evidence, result, rubric, validation = [], {}, {}, {}
-                if result.get("dimension_scores"):
+                if result.get("dimension_scores") and not essay_outline_mode:
                     dimension_cards = []
                     for dimension in result.get("dimension_scores", []):
                         dimension_cards.append(
@@ -376,15 +414,23 @@ class GradingController:
                   <summary>逐点纠错</summary>
                   <p class="muted">纠正后逐点判断立即更新，综合分标记为待重新批改且不再计入统计。勾选“同题后续”会让该纠正影响下一次本题基准。</p>
                   <div class="grading-feedback-list">{"".join(feedback_items)}</div>
-                </details>"""
+                </details>""" if not essay_outline_mode else ""
             report_source_text = report_answer_snapshot(
                 report["prompt_text"],
                 result,
                 attempt["answer_text"],
             )
+            # 智能批改把批注存在 result_json.annotations 里，报告正文并没有行内标记；
+            # 不在这里补一节带标记的批注，页面上就永远看不到逐句批改。
+            display_report_text = append_smart_annotations(
+                display_report_text,
+                (result.get("annotations") if isinstance(result, dict) else None) or [],
+            )
+            report_hidden = "" if report_index == 0 else " hidden"
+            report_model_label = "Markdown 导入" if imported_report else (report["model"] or "手动保存")
             reports_html.append(f"""
-            <article class="report-card" id="report-{report["id"]}">
-              <header><strong>{esc(report["provider"] or "Codex")}</strong><span>{esc(report["model"] or "手动保存")} · {esc(format_beijing_time(report["created_at"]))}</span></header>
+            <article class="report-card" id="report-{report["id"]}" data-report-card{report_hidden}>
+              <header><strong>{esc(report["provider"] or "Codex")}</strong><span>{esc(report_model_label)} · {esc(format_beijing_time(report["created_at"]))}</span></header>
               {report_word_warning}
               {smart_score_html}
               <div class="report-body">{markdownish(display_report_text, report_return_to, report_source_text, report_annotation_scope)}</div>
@@ -413,7 +459,7 @@ class GradingController:
             <article class="report-card report-preview-card" id="{esc(preview_id)}">
               <header><strong>API 批改报告</strong><span>超出字数限制</span></header>
               <div class="report-preview-warning" role="alert">
-                <div><strong>修改版答案超出字数限制 {over_by} 字</strong><span>当前 {actual_chars} 字 · 应低于 {hard_limit} 字</span></div>
+                <div><strong>修改版答案超出字数限制 {over_by} 格</strong><span>占格 {actual_chars}/{hard_limit} 格</span></div>
                 <button class="button ghost small" type="button" data-preview-copy>复制报告</button>
               </div>
               <textarea data-preview-source hidden>{esc(preview_report_text)}</textarea>
@@ -421,9 +467,9 @@ class GradingController:
             </article>"""
         if not reports_html and not preview_html:
             reports_html.append(
-                f'<div class="grading-empty"><span>01</span><h3>答案已经保存，下一步开始批改</h3><p>使用当前批改设置生成报告，完成后这里会直接展示结果。</p><button class="button primary" type="submit" form="grading-reference-form" formaction="/attempts/{attempt_id}/grade" data-grade-submit{"" if settings["mode"] == "api" else " disabled"}>开始智能批改</button></div>'
+                f'<div class="grading-empty"><span>01</span><h3>答案已经保存，下一步开始{"大作文审阅" if essay_outline_mode else "批改"}</h3><p>{"检查立意、结构、逐段行文并积累主题表达。" if essay_outline_mode else "使用当前参考材料生成报告，完成后这里会直接展示结果。"}</p><button class="button primary" type="submit" form="grading-reference-form" formaction="/attempts/{attempt_id}/grade" data-grade-submit{"" if settings["mode"] in ("api", "chatgpt", "workbuddy") else " disabled"}>{"开始审阅作文" if essay_outline_mode else "开始智能批改"}</button></div>'
             )
-        api_disabled = "" if settings["mode"] == "api" else " disabled"
+        api_disabled = "" if settings["mode"] in ("api", "chatgpt", "workbuddy") else " disabled"
         active_job_html = ""
         if grading_job and grading_job["status"] in set(ACTIVE_JOB_STATUSES) | {"failed", "interrupted"}:
             payload = grading_job_payload(grading_job)
@@ -433,22 +479,29 @@ class GradingController:
                 <progress max="100" value="{payload["progress"]}" data-grading-job-bar></progress>
                 <p data-grading-job-error>{esc(payload["error"])}</p>
               </div>"""
+        report_switcher_html = (
+            f'<div class="grading-report-switcher" data-report-switcher>{"".join(report_tabs)}</div>'
+            if len(reports) > 1
+            else ""
+        )
         report_section = f"""
         <section class="inline-report-stack">
-          <div class="section-heading"><div><p class="eyebrow">AI Report</p><h2>批改报告</h2></div><span>{len(reports)} 份已保存</span></div>
+          <div class="section-heading"><div><p class="eyebrow">AI Report</p><h2>{"大作文审阅报告" if essay_outline_mode else "批改报告"}</h2></div><span>{len(reports)} 份已保存</span></div>
+          {report_switcher_html}
           {preview_html}
           {"".join(reports_html)}
         </section>"""
         more_html = f"""
           <a href="/attempts">全部作答记录</a>
-          <a href="/attempts/{attempt_id}/package.md">下载批改包</a>
+          <a href="/attempts/{attempt_id}/package.md" data-package-download>下载批改包 (MD)</a>
+          <a href="/attempts/{attempt_id}/package.zip" data-package-download>导出批改包 (ZIP)</a>
           <form method="post" action="/attempts/{attempt_id}/delete" data-confirm="确认删除这次作答和对应批改报告吗？"><button class="menu-danger" type="submit">删除本次作答</button></form>
         """
         body = f"""
         {workflow_header("grading", question, question=question, attempt=attempt, more_html=more_html, context_return=context_return)}
         <section class="grading-layout grading-result-first" data-resizable-attempt-pane data-resize-storage-key="gongkao.gradingPaneWidth.v2" data-default-side-width="480" data-default-side-ratio="0.42" data-min-main-width="440" data-min-side-width="360">
           <article class="grading-source">
-            <section class="text-block answer-editor"><div class="section-heading"><div><h2>我的答案</h2></div><span>{esc(timing_summary)}</span></div><form method="post" action="/attempts/{attempt_id}/update" data-answer-form data-dirty-submit data-autosave-url="/attempts/{attempt_id}/update" data-word-limit="{esc(question["word_limit"])}"><textarea name="answer_text" data-answer-hidden hidden>{esc(attempt["answer_text"])}</textarea><input type="hidden" name="answer_format_json" value="{esc(attempt["answer_format_json"] or "[]")}" data-answer-format-hidden><input type="hidden" name="annotations_json" data-annotations-hidden><input type="hidden" name="annotations_text_hash" data-annotations-hash-hidden><div class="answer-editor-toolbar" data-editor-toolbar data-editor-target="#grading-answer-input"><span class="answer-editor-toolbar-label">排版</span><button type="button" class="is-active" data-editor-align="left" title="左对齐">左</button><button type="button" data-editor-align="center" title="居中">中</button><button type="button" data-editor-align="right" title="右对齐">右</button></div><div id="grading-answer-input" class="direct-text-editor" contenteditable="true" role="textbox" aria-label="我的答案" spellcheck="false" data-answer-input data-text-annotation data-paragraph-alignments="{esc(attempt["answer_format_json"] or "[]")}" data-highlight-scope="attempt-{attempt_id}" data-annotation-type="answer" data-annotation-id="{attempt_id}" data-annotation-target="answer" data-attempt-id="{attempt_id}" {answer_annotation_attrs} data-empty-text="答案为空，输入后可直接标亮和划线。">{esc(attempt["answer_text"])}</div><div class="answer-editor-footer"><div class="answer-counter" aria-live="polite"><span>当前 <strong data-word-count>{attempt["word_count"]}</strong> 字</span><span data-line-status>行数：0</span><span data-current-line-status>本行：0/25格</span><span data-word-status></span><span data-autosave-status>已保存</span></div><div class="answer-editor-actions"><button class="button ghost small" type="button" data-clear-text-annotations>清除标注</button><button class="button primary small" type="submit">立即保存</button></div></div></form></section>
+            <section class="text-block answer-editor"><div class="section-heading"><div><h2>我的答案</h2></div><span>{esc(timing_summary)}</span></div><form method="post" action="/attempts/{attempt_id}/update" data-answer-form data-dirty-submit data-autosave-url="/attempts/{attempt_id}/update" data-word-limit="{esc(question["word_limit"])}"><textarea name="answer_text" data-answer-hidden hidden>{esc(attempt["answer_text"])}</textarea><input type="hidden" name="answer_format_json" value="{esc(attempt["answer_format_json"] or "[]")}" data-answer-format-hidden><input type="hidden" name="annotations_json" data-annotations-hidden><input type="hidden" name="annotations_text_hash" data-annotations-hash-hidden><div class="answer-editor-toolbar" data-editor-toolbar data-editor-target="#grading-answer-input"><span class="answer-editor-toolbar-label">排版</span><button type="button" class="is-active" data-editor-align="left" title="左对齐">左</button><button type="button" data-editor-align="center" title="居中">中</button><button type="button" data-editor-align="right" title="右对齐">右</button></div><div class="answer-grid-scroll"><div id="grading-answer-input" class="direct-text-editor" contenteditable="true" role="textbox" aria-label="我的答案" spellcheck="false" data-answer-input data-text-annotation data-paragraph-alignments="{esc(attempt["answer_format_json"] or "[]")}" data-highlight-scope="attempt-{attempt_id}" data-annotation-type="answer" data-annotation-id="{attempt_id}" data-annotation-target="answer" data-attempt-id="{attempt_id}" {answer_annotation_attrs} data-empty-text="答案为空，输入后可直接标亮和划线。">{esc(attempt["answer_text"])}</div></div><div class="answer-editor-footer"><div class="answer-counter" aria-live="polite"><span>当前 <strong data-word-count>{attempt["word_count"]}</strong> 字</span><span data-line-status>行数：0</span><span data-current-line-status>本行：0/25格</span><span data-word-status></span><span data-autosave-status>已保存</span></div><div class="answer-editor-actions"><button class="button ghost small" type="button" data-clear-text-annotations>清除标注</button><button class="button primary small" type="submit">立即保存</button></div></div></form></section>
             <section class="text-block attempt-note-panel">
               <div class="section-heading"><div><h2>复盘笔记</h2></div><span data-attempt-note-status>自动保存开启</span></div>
               <div class="answer-editor-toolbar" data-editor-toolbar data-editor-target="#grading-note-input"><span class="answer-editor-toolbar-label">排版</span><button type="button" class="is-active" data-editor-align="left" title="左对齐">左</button><button type="button" data-editor-align="center" title="居中">中</button><button type="button" data-editor-align="right" title="右对齐">右</button></div>
@@ -461,50 +514,57 @@ class GradingController:
           <button class="pane-resizer" type="button" aria-label="调整批改侧栏宽度" data-pane-resizer></button>
           <aside class="grading-tools" data-session-scroll="grading-tools">
             <details class="grading-context-disclosure grading-compare-panel"{' open data-default-open="1"' if reports else ""}>
-              <summary>查看题目、材料与参考答案</summary>
+              <summary>{"查看题目与材料（机构答案不参与作文审阅）" if essay_outline_mode else "查看题目、材料与参考答案"}</summary>
               <div class="grading-context-body">
                 <section><h2>题目</h2><p class="paper-line">第{question["question_number"] or "?"}题 · {esc(question["question_type"])}</p><div class="preline prompt-strong">{pre(question["prompt"])}</div><div class="preline">{pre(question["requirements"])}</div></section>
-                <section><h2>相关材料</h2>{materials_html}</section>
-                <section><h2>参考答案</h2>{refs_html}</section>
+                <section><h2>相关材料</h2><div data-grading-material-home><div data-grading-material-content>{materials_html}</div></div><p class="muted grading-material-placeholder" data-grading-material-placeholder hidden>材料正在左侧显示。</p></section>
+                {'' if essay_outline_mode else f'<section><div class="grading-reference-heading"><h2>参考答案</h2><button class="button ghost small" type="button" data-open-grading-materials aria-controls="grading-material-drawer" aria-expanded="false">显示材料</button></div>{refs_html}</section>'}
               </div>
             </details>
             <section class="tool-panel api-grade-panel grading-primary-action">
-              <p class="eyebrow">Grading</p><h2>{"重新批改" if reports else "开始批改"}</h2>
+              <p class="eyebrow">{"Essay review" if essay_outline_mode else "Grading"}</p><h2>{("重新审阅作文" if reports else "审阅大作文") if essay_outline_mode else ("重新批改" if reports else "开始批改")}</h2>
               <p class="muted">模型：{esc(settings["provider_name"])} / {esc(settings["model"])}</p>
-              <button class="button primary" type="submit" form="grading-reference-form" formaction="/attempts/{attempt_id}/grade" data-grade-submit{api_disabled}>{"重新生成报告" if reports else "开始智能批改"}</button>
+              <button class="button primary" type="submit" form="grading-reference-form" formaction="/attempts/{attempt_id}/grade" data-grade-submit{api_disabled}>{("重新审阅作文" if reports else "开始审阅作文") if essay_outline_mode else (("重新生成报告" if reports else "开始智能批改") if smart_grading_enabled else ("重新生成报告" if reports else "开始批改"))}</button>
+              <p class="muted grade-mode-hint">{"当前：智能批改（含进度条与逐句批注）" if smart_grading_enabled else "当前：基础批改（单次调用，无进度条与逐句批注）"}</p>
+              <a class="button ghost" href="/attempts/{attempt_id}/package.zip" data-package-download>导出批改包</a>
+              <form class="grading-report-import" method="post" action="/attempts/{attempt_id}/reports/import" enctype="multipart/form-data" data-report-import-form>
+                <input type="file" name="report_file" accept=".md,.markdown,text/markdown" data-report-import-file hidden>
+                <button class="button ghost" type="button" data-report-import-trigger>导入批改数据</button>
+                <span class="muted" data-report-import-status>仅支持研申批改包生成的 Markdown</span>
+              </form>
               <div class="grade-loading" aria-live="polite"><span>生成中，请稍候</span><i></i></div>
               {active_job_html}
-              {f'<form method="post" action="/questions/{question["id"]}/rubric/rebuild"><input type="hidden" name="return_to" value="/attempts/{attempt_id}"><button class="button ghost small" type="submit">重建本题基准</button></form>' if cache_info["cached"] and smart_grading_enabled else ""}
-              {'<p class="warning-note">设置页切换到 API 自动模式后可用。</p>' if settings["mode"] != "api" else ""}
+              {f'<form method="post" action="/questions/{question["id"]}/rubric/rebuild"><input type="hidden" name="return_to" value="/attempts/{attempt_id}"><button class="button ghost small" type="submit">重建本题基准</button></form>' if cache_info["cached"] and smart_grading_enabled and not essay_outline_mode else ""}
+              {'<p class="warning-note">设置页切换到 API 自动模式、ChatGPT 模式或 WorkBuddy 账号后可用。</p>' if settings["mode"] not in ("api", "chatgpt", "workbuddy") else ""}
             </section>
             <section class="tool-panel">
               <h2>AI 训练教练</h2>
-              <p class="muted">围绕本次作答生成失分拆解、修改动作和延伸训练建议。</p>
+              <p class="muted">{"围绕作文立意、论证层次、行文细节和材料运用生成复盘建议。" if essay_outline_mode else "围绕本次作答生成失分拆解、修改动作和延伸训练建议。"}</p>
               <a class="button primary grading-review-action" href="/agent?mode=review&attempt_id={attempt_id}">复盘本题</a>
             </section>
             <details class="grading-advanced tool-panel">
               <summary>批改设置与高级工具</summary>
               <div class="grading-advanced-body">
             <section class="grading-reference-panel">
-              <div class="reference-picker-heading">
+              <div class="reference-picker-heading"{" hidden" if essay_outline_mode else ""}>
                 <div><h2>批改参考</h2><p class="muted">默认全选，可按本次作答单独调整。</p></div>
                 <span data-reference-count>{len(selected_refs)} / {len(refs)}</span>
               </div>
               <form id="grading-reference-form" method="post" action="/attempts/{attempt_id}/grading-references" data-grading-references data-preserve-sidebar>
                 <div class="smart-grading-options">
-                  <label class="check-line smart-mode-option" title="使用本题不等权评分基准进行综合评分；辅助数据只用于点评建议"><input type="checkbox" name="use_smart_grading" value="1"{smart_grading_checked}> 智能批改 <small>综合评分</small></label>
+                  {'' if essay_outline_mode else f'<label class="check-line smart-mode-option" title="使用本题不等权评分基准进行综合评分；辅助数据只用于点评建议"><input type="checkbox" name="use_smart_grading" value="1"{smart_grading_checked}> 智能批改 <small>综合评分</small></label>'}
                   <label class="check-line"><input type="checkbox" name="use_analogies" value="1" checked> 相似题方法</label>
                   <label class="check-line"><input type="checkbox" name="use_knowledge" value="1" checked> 教材知识</label>
                   <label class="check-line"><input type="checkbox" name="use_history" value="1" checked> 个人历史</label>
                   <label class="check-line smart-mode-option smart-depth-option" title="启用模型高级思考，批改更深入但等待时间会明显增加"><input type="checkbox" name="use_deep_thinking" value="1" data-deep-thinking-preference{deep_thinking_explicit}{deep_thinking_checked}> 深度思考 <small>较慢</small></label>
                 </div>
-                <p class="muted smart-grading-mode-note">取消“智能批改”即使用原基础批改；取消“深度思考”可缩短模型响应时间。</p>
-                <div class="reference-picker-actions">
+                <p class="muted smart-grading-mode-note">{"大作文审阅不评分。ChatGPT 模式会联网搜索范文；API 模式不具备联网能力，报告会注明未联网。" if essay_outline_mode else "取消“智能批改”即使用原基础批改；取消“深度思考”可缩短模型响应时间。"}</p>
+                <div class="reference-picker-actions"{" hidden" if essay_outline_mode else ""}>
                   <button type="button" data-reference-select-all>全选</button>
                   <button type="button" data-reference-clear>清空</button>
                 </div>
-                <div class="grading-reference-list">{"".join(reference_options)}</div>
-                <label class="custom-reference-field"><span>自定义参考答案</span><textarea name="custom_reference_answer" rows="5" placeholder="可选。填写后会作为额外一份参考答案送入提示词。">{esc(custom_reference_answer)}</textarea></label>
+                <div class="grading-reference-list"{" hidden" if essay_outline_mode else ""}>{"".join(reference_options)}</div>
+                {'' if essay_outline_mode else f'<label class="custom-reference-field"><span>自定义参考答案</span><textarea name="custom_reference_answer" rows="5" placeholder="可选。填写后会作为额外一份参考答案送入提示词。">{esc(custom_reference_answer)}</textarea></label>'}
                 <p class="reference-dirty-note" data-reference-dirty-note hidden>参考设置有修改。请先保存，再复制或下载手动批改包。</p>
                 <button class="button primary" type="submit" data-reference-save hidden>保存参考设置</button>
               </form>
@@ -515,7 +575,8 @@ class GradingController:
               <p class="package-basis-note{" is-ready" if cache_info["cached"] else ""}">{esc(package_basis_note)}</p>
               <textarea id="grading-package" class="package-text" readonly rows="12">{esc(package)}</textarea>
               <button class="button primary" type="button" data-package-copy>复制批改包</button>
-              <a class="button ghost" href="/attempts/{attempt_id}/package.md" data-package-download>下载 Markdown</a>
+              <a class="button ghost" href="/attempts/{attempt_id}/package.zip" data-package-download>导出批改包 (ZIP)</a>
+              <a class="button ghost" href="/attempts/{attempt_id}/package.md">下载 Markdown</a>
             </section>
             <section class="tool-panel">
               <h2>粘贴报告</h2>
@@ -529,6 +590,10 @@ class GradingController:
             </details>
           </aside>
         </section>
+        <div class="grading-material-drawer" id="grading-material-drawer" role="dialog" aria-modal="false" aria-labelledby="grading-material-drawer-title" data-grading-material-drawer hidden>
+          <header class="grading-material-drawer-header"><div><p class="eyebrow">Material</p><h2 id="grading-material-drawer-title">本题材料</h2></div><button class="button ghost small" type="button" data-close-grading-materials aria-label="关闭材料弹窗">关闭 ×</button></header>
+          <div class="grading-material-drawer-body" data-grading-material-drawer-body></div>
+        </div>
         """
         self.send_html(
             layout(
@@ -539,6 +604,109 @@ class GradingController:
                 transient_route=citation_target,
             )
         )
+
+    def handle_import_report(self, path):
+        try:
+            attempt_id = int(path.strip("/").split("/")[1])
+        except (ValueError, IndexError):
+            self.send_error(404)
+            return
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
+        )
+        report_file = (
+            form["report_file"]
+            if "report_file" in form and getattr(form["report_file"], "filename", "")
+            else None
+        )
+        if report_file is None:
+            self.page_attempt_detail(
+                f"/attempts/{attempt_id}",
+                [("error", "请选择研申批改包生成的 Markdown 批改报告。")],
+            )
+            return
+        filename = str(getattr(report_file, "filename", "") or "").replace("\\", "/").rsplit("/", 1)[-1]
+        if not filename.lower().endswith((".md", ".markdown")):
+            self.page_attempt_detail(
+                f"/attempts/{attempt_id}",
+                [("error", "批改数据仅支持 .md 或 .markdown 文件。")],
+            )
+            return
+        raw_bytes = report_file.file.read(1024 * 1024 + 1)
+        if len(raw_bytes) > 1024 * 1024:
+            self.page_attempt_detail(
+                f"/attempts/{attempt_id}",
+                [("error", "Markdown 批改报告超过 1MB，已拒绝导入。")],
+            )
+            return
+        try:
+            imported_text = raw_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            self.page_attempt_detail(
+                f"/attempts/{attempt_id}",
+                [("error", "Markdown 批改报告必须使用 UTF-8 编码。")],
+            )
+            return
+        with connect(self.db_path) as conn:
+            attempt = conn.execute(
+                """
+                SELECT a.answer_text, q.word_limit, q.question_code, q.question_type
+                  FROM attempts a
+                  JOIN questions q ON q.id = a.question_id
+                 WHERE a.id = ?
+                """,
+                (attempt_id,),
+            ).fetchone()
+            if not attempt:
+                self.send_error(404)
+                return
+            report_text, errors = parse_imported_grading_report(
+                imported_text,
+                attempt["question_code"] or "",
+                "综合写作" if attempt["question_type"] == "综合写作" else "",
+            )
+            if errors:
+                self.page_attempt_detail(
+                    f"/attempts/{attempt_id}",
+                    [("error", "无法导入批改数据：" + "；".join(errors))],
+                )
+                return
+            report_text = normalize_revised_answer_word_count(
+                report_text,
+                attempt["word_limit"] or "",
+            )
+            status = revised_answer_word_count_status(
+                report_text,
+                attempt["word_limit"] or "",
+            )
+            if status["over_limit"]:
+                self.page_attempt_detail(
+                    f"/attempts/{attempt_id}",
+                    [(
+                        "error",
+                        f"导入报告中的修改版答案超出字数限制 {status['over_by']} 字，请先让外部模型压缩后重新导入。",
+                    )],
+                )
+                return
+            cursor = conn.execute(
+                """
+                INSERT INTO grading_reports (
+                    attempt_id, provider, model, report_text, prompt_text, raw_response, status
+                ) VALUES (?, '外部导入', 'imported-md', ?, ?, ?, 'ok')
+                """,
+                (
+                    attempt_id,
+                    report_text,
+                    "本次作答：\n"
+                    + json.dumps({"answer_text": attempt["answer_text"] or ""}, ensure_ascii=False),
+                    json.dumps({"filename": filename}, ensure_ascii=False),
+                ),
+            )
+            report_id = cursor.lastrowid
+            ingest_report_normative_expressions(conn, report_id)
+        self.redirect(f"/attempts/{attempt_id}#report-{report_id}")
 
     def handle_save_report(self, path):
         try:
@@ -575,12 +743,12 @@ class GradingController:
                         [
                             (
                                 "error",
-                                f"修改版答案未低于字数硬限制，至少还需压缩 {status['over_by']} 字，已拒绝保存。手工报告不会自动调用 API 返修。",
+                                f"修改版答案超出字数硬限制，至少还需压缩 {status['over_by']} 字，已拒绝保存。手工报告不会自动调用 API 返修。",
                             )
                         ],
                     )
                     return
-                conn.execute(
+                cursor = conn.execute(
                     """
                     INSERT INTO grading_reports (
                         attempt_id, provider, model, report_text, prompt_text, status
@@ -597,6 +765,7 @@ class GradingController:
                         ),
                     ),
                 )
+                ingest_report_normative_expressions(conn, cursor.lastrowid)
         self.redirect(f"/attempts/{attempt_id}")
 
     def handle_grading_references(self, path):
@@ -611,7 +780,7 @@ class GradingController:
         if not context:
             self.send_error(404)
             return
-        attempt, question, refs, materials, reports, settings, _ = context
+        attempt, question, refs, materials, reports, settings, _, _ = context
         selected_refs, selected_ids, custom_answer = grading_references_from_form(data, refs)
         with connect(self.db_path) as conn:
             save_attempt_grading_references(conn, attempt_id, selected_ids, custom_answer)
@@ -711,10 +880,10 @@ class GradingController:
         if not context:
             self.send_error(404)
             return
-        attempt, question, refs, materials, reports, settings, _ = context
-        if settings["mode"] != "api":
+        attempt, question, refs, materials, reports, settings, _, _ = context
+        if settings["mode"] not in ("api", "chatgpt", "workbuddy"):
             self.page_attempt_detail(
-                f"/attempts/{attempt_id}", [("error", "当前不是 API 自动模式，请先在设置页切换。")]
+                f"/attempts/{attempt_id}", [("error", "当前不是 API 自动模式、ChatGPT 模式或 WorkBuddy 账号，请先在设置页切换。")]
             )
             return
         if data:
@@ -729,7 +898,7 @@ class GradingController:
         else:
             use_smart_grading = (settings["grading_mode"] or "basic") == "enhanced"
             use_deep_thinking = False
-        if use_smart_grading:
+        if use_smart_grading or question["question_type"] == "综合写作":
             options = {
                 "analogies": "use_analogies" in form if data else True,
                 "knowledge": "use_knowledge" in form if data else True,
@@ -743,8 +912,8 @@ class GradingController:
                     conn,
                     fresh_attempt,
                     fresh_settings,
-                    selected_ids,
-                    custom_answer,
+                    [] if question["question_type"] == "综合写作" else selected_ids,
+                    "" if question["question_type"] == "综合写作" else custom_answer,
                     options,
                 )
             if created:
@@ -769,11 +938,32 @@ class GradingController:
                 question["word_limit"] or "",
             )
             stored_raw = raw
+            # 基础批改同样要把超限的修改稿压到达标。只压一轮会留下“仍然超限”的稿子，
+            # 用户在报告里看到的就是“修改版答案超出字数限制”的提示。
+            # 顺序：先本地无损压缩（合并短段、去换行留空），再在基础批改的调用预算内循环追问模型。
             status = revised_answer_word_count_status(
                 report_text,
                 question["word_limit"] or "",
             )
             if status["over_limit"]:
+                section = split_revised_answer_section(report_text)
+                local_answer = compact_revised_answer_linebreaks(
+                    revised_answer_body(report_text[section[1]:section[2]]),
+                    question["word_limit"] or "",
+                ) if section else ""
+                if local_answer:
+                    report_text = replace_revised_answer_body(
+                        report_text,
+                        local_answer,
+                        question["word_limit"] or "",
+                    )
+                    status = revised_answer_word_count_status(
+                        report_text,
+                        question["word_limit"] or "",
+                    )
+            compression_calls = 0
+            while status["over_limit"] and compression_calls < BASIC_GRADING_COMPRESSION_CALLS:
+                compression_calls += 1
                 retry_prompt = build_revised_answer_retry_prompt(
                     prompt,
                     report_text,
@@ -784,14 +974,27 @@ class GradingController:
                     retry_prompt,
                     {"thinking": "disabled"},
                 )
-                repaired_answer = parse_revised_answer_repair(repair_response)
-                stored_raw = f"{raw}\n\n--- localized revised-answer repair ---\n{repair_raw}"
-                if repaired_answer:
-                    report_text = replace_revised_answer_body(
-                        report_text,
-                        repaired_answer,
-                        question["word_limit"] or "",
-                    )
+                stored_raw = f"{stored_raw}\n\n--- localized revised-answer repair {compression_calls} ---\n{repair_raw}"
+                repaired_answer = compact_revised_answer_linebreaks(
+                    parse_revised_answer_repair(repair_response),
+                    question["word_limit"] or "",
+                )
+                if not repaired_answer:
+                    break
+                report_text = replace_revised_answer_body(
+                    report_text,
+                    repaired_answer,
+                    question["word_limit"] or "",
+                )
+                next_status = revised_answer_word_count_status(
+                    report_text,
+                    question["word_limit"] or "",
+                )
+                if next_status["over_by"] >= status["over_by"]:
+                    # 压缩没有实际进展（模型原样返回或更差），停止以免浪费调用。
+                    status = next_status
+                    break
+                status = next_status
         except (AiConfigError, AiRequestError) as exc:
             self.page_attempt_detail(f"/attempts/{attempt_id}", [("error", str(exc))])
             return
@@ -809,6 +1012,7 @@ class GradingController:
                 (attempt_id, settings["provider_name"], settings["model"], report_text, prompt, stored_raw),
             )
             report_id = cursor.lastrowid
+            ingest_report_normative_expressions(conn, report_id)
         self.redirect(
             local_url(
                 f"/attempts/{attempt_id}",

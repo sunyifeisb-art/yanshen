@@ -1,14 +1,17 @@
 """Attempt editing, annotation, favorite, and package controllers."""
 
 from ...answer_formatting import normalize_answer_format_json
+from ...grading_pipeline.evidence import retrieve_grading_evidence
 from ..runtime import (
     apply_versioned_autosave,
     attempt_grading_references,
     autosave_identity,
     build_grading_package,
+    build_grading_package_zip,
     connect,
     count_cjk_chars,
     json,
+    logging,
     manual_grading_basis,
     nonnegative_int,
     paper_attempt_duration_seconds,
@@ -246,17 +249,12 @@ class PracticeController:
                 conn.execute("DELETE FROM attempts WHERE id = ?", (attempt_id,))
         self.redirect(return_to)
 
-    def blank_package(self, path):
-        try:
-            question_id = int(path.strip("/").split("/")[1])
-        except (ValueError, IndexError):
-            self.send_error(404)
-            return
+    def _blank_package(self, question_id):
+        """Return (package_text, display_title) for a question without an attempt, or (None, None)."""
         with connect(self.db_path) as conn:
             question = conn.execute("SELECT * FROM questions WHERE id = ?", (question_id,)).fetchone()
             if not question:
-                self.send_error(404)
-                return
+                return None, None
             refs = conn.execute(
                 "SELECT * FROM reference_answers WHERE question_id = ? ORDER BY organization", (question_id,)
             ).fetchall()
@@ -271,24 +269,30 @@ class PracticeController:
         relevant_materials = select_relevant_materials(question, materials)
         with connect(self.db_path) as conn:
             grading_basis = manual_grading_basis(conn, question, relevant_materials, refs)
-        self.send_text(
-            build_grading_package(question, refs, materials=materials, grading_basis=grading_basis),
-            f"申论第{question['question_number'] or question['id']}题-批改包.md",
-            "text/markdown; charset=utf-8",
-        )
-
-    def attempt_package(self, path):
+        rubric = (grading_basis.get("rubric") or {}) if grading_basis.get("kind") == "cached_rubric" else {}
+        evidence = None
         try:
-            attempt_id = int(path.strip("/").split("/")[1])
-        except (ValueError, IndexError):
-            self.send_error(404)
-            return
+            with connect(self.db_path) as conn:
+                evidence, _ = retrieve_grading_evidence(
+                    conn, dict(question), {}, rubric,
+                    {"analogies": True, "knowledge": True, "history": False},
+                )
+        except Exception:
+            evidence = None
+        package = build_grading_package(
+            question, refs, materials=materials, grading_basis=grading_basis, evidence=evidence
+        )
+        return package, f"申论第{question['question_number'] or question['id']}题"
+
+    def _attempt_package(self, attempt_id):
+        """Return (package_text, display_title) for an attempt, or (None, None)."""
         with connect(self.db_path) as conn:
             attempt = conn.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
             if not attempt:
-                self.send_error(404)
-                return
+                return None, None
             question = conn.execute("SELECT * FROM questions WHERE id = ?", (attempt["question_id"],)).fetchone()
+            if not question:
+                return None, None
             refs = conn.execute(
                 "SELECT * FROM reference_answers WHERE question_id = ? ORDER BY organization", (question["id"],)
             ).fetchall()
@@ -300,19 +304,70 @@ class PracticeController:
                 if question["paper_id"]
                 else []
             )
-        selected_refs, selected_ids, custom_answer = attempt_grading_references(attempt, refs)
+        selected_refs, _selected_ids, custom_answer = attempt_grading_references(attempt, refs)
         relevant_materials = select_relevant_materials(question, materials)
         with connect(self.db_path) as conn:
             grading_basis = manual_grading_basis(conn, question, relevant_materials, selected_refs)
-        self.send_text(
-            build_grading_package(
-                question,
-                selected_refs,
-                attempt,
-                materials,
-                custom_answer,
-                grading_basis,
-            ),
-            f"申论第{question['question_number'] or question['id']}题-作答.md",
-            "text/markdown; charset=utf-8",
+        rubric = (grading_basis.get("rubric") or {}) if grading_basis.get("kind") == "cached_rubric" else {}
+        evidence = None
+        try:
+            with connect(self.db_path) as conn:
+                evidence, _ = retrieve_grading_evidence(
+                    conn, dict(question), dict(attempt), rubric,
+                    {"analogies": True, "knowledge": True, "history": True},
+                )
+        except Exception as evidence_error:
+            logging.warning("attempt package evidence retrieval degraded: %s", evidence_error)
+            evidence = None
+        package = build_grading_package(
+            question, selected_refs, attempt, materials, custom_answer, grading_basis, evidence=evidence
         )
+        return package, f"申论第{question['question_number'] or question['id']}题"
+
+    def blank_package(self, path):
+        try:
+            question_id = int(path.strip("/").split("/")[1])
+        except (ValueError, IndexError):
+            self.send_error(404)
+            return
+        package, title = self._blank_package(question_id)
+        if package is None:
+            self.send_error(404)
+            return
+        self.send_text(package, f"{title}-批改包.md", "text/markdown; charset=utf-8")
+
+    def blank_package_zip(self, path):
+        try:
+            question_id = int(path.strip("/").split("/")[1])
+        except (ValueError, IndexError):
+            self.send_error(404)
+            return
+        package, title = self._blank_package(question_id)
+        if package is None:
+            self.send_error(404)
+            return
+        self.send_bytes(build_grading_package_zip(package), f"{title}-批改包.zip", "application/zip")
+
+    def attempt_package(self, path):
+        try:
+            attempt_id = int(path.strip("/").split("/")[1])
+        except (ValueError, IndexError):
+            self.send_error(404)
+            return
+        package, title = self._attempt_package(attempt_id)
+        if package is None:
+            self.send_error(404)
+            return
+        self.send_text(package, f"{title}-作答.md", "text/markdown; charset=utf-8")
+
+    def attempt_package_zip(self, path):
+        try:
+            attempt_id = int(path.strip("/").split("/")[1])
+        except (ValueError, IndexError):
+            self.send_error(404)
+            return
+        package, title = self._attempt_package(attempt_id)
+        if package is None:
+            self.send_error(404)
+            return
+        self.send_bytes(build_grading_package_zip(package), f"{title}-批改包.zip", "application/zip")

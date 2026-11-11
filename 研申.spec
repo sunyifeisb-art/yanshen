@@ -13,8 +13,6 @@ OPTIONAL_EVAL_EXCLUDES = [
     "scipy",
     "sklearn",
     "matplotlib",
-    "PIL",
-    "reportlab",
     "pdfminer",
     "pypdfium2",
     "pypdfium2_raw",
@@ -67,7 +65,12 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=collect_submodules("tkinter") + collect_submodules("webview") + AGENT_HIDDENIMPORTS,
+    hiddenimports=(
+        collect_submodules("tkinter")
+        + collect_submodules("webview")
+        + AGENT_HIDDENIMPORTS
+        + ["encodings.utf_16_be"]
+    ),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -5,13 +5,16 @@ import threading
 from ..agent_modules import FEATURE_HASH_MODEL
 from ..db import connect
 from ..grading import (
+    build_revised_answer_local_edit_prompt,
     build_revised_answer_retry_prompt,
     compact_revised_answer_linebreaks,
     normalize_revised_answer_word_count,
     parse_revised_answer_repair,
     replace_revised_answer_body,
+    revised_answer_overwrites_original,
     revised_answer_word_count_status,
 )
+from ..normative_expressions import ingest_report_normative_expressions
 from .calibration import load_calibration_policy
 from .common import (
     PIPELINE_VERSION,
@@ -27,6 +30,11 @@ from .common import (
     rubric_source_hash,
 )
 from .contracts import GradingJobOptions
+from .essay_review import (
+    build_essay_review_prompt,
+    render_essay_review,
+    validate_essay_review,
+)
 from .evidence import (
     ESSAY_SCORING_GUIDANCE,
     _save_rubric_to_db,
@@ -77,6 +85,23 @@ def _repair_json_prompt(original, response, tag):
 {original}
 
 待修复响应：
+{response}
+"""
+
+
+def _repair_rubric_prompt(original, response, error):
+    return f"""下面的评分基准虽然可以解析，但未通过业务校验：{error}
+请重新核对题干、材料原文和机构参考答案，修正计分点本身，不能只修改 JSON 格式。
+- 每个计分点的 material_evidence.quote 必须是本题材料中的连续原文，不能引用机构答案或编造材料。
+- core 需要达到原任务规定的机构支持数量。没有机构共识、但材料直接证实且属于完成题目任务不可缺少的要点，可用 material_core，并设 required_for_full_score=true、填写正数 suggested_weight。
+- supporting 和 disputed 不能充当必答计分点；不要仅为了通过校验把缺乏材料依据的点改为 material_core。
+- 至少保留一个经材料校验的必答计分点。若原响应中的点均不成立，请根据材料和题目任务重新提炼。
+只输出 <rubric_json> 与 </rubric_json> 包裹的完整合法 JSON，不要输出 Markdown。
+
+原任务：
+{original}
+
+未通过校验的响应：
 {response}
 """
 
@@ -177,6 +202,80 @@ def _call_grading_model(
     )
 
 
+def _run_essay_review_job(db_path, job_id, chat_completion_func, run_state, context):
+    _, attempt, question, materials, references, settings, _, options = context
+    answer_text = attempt.get("answer_text") or ""
+    from ..ai import AiConfigError, AiRequestError, chat_completion, codex_research_completion
+
+    can_search = settings.get("mode") == "chatgpt" and chat_completion_func is chat_completion
+    prompt = build_essay_review_prompt(
+        question, materials, answer_text, can_search=can_search,
+    )
+    _update_job(db_path, job_id, "grading", 50,
+                "正在检索范文并审阅作文…" if can_search else "正在审阅作文与材料…")
+    run_state.reserve_model_call("essay_review", "联网研究与作文审阅" if can_search else "作文审阅")
+    if can_search:
+        try:
+            response, raw = codex_research_completion(
+                settings, prompt, {"thinking": "enabled" if options.get("deep_thinking") else "disabled"},
+            )
+        except (AiConfigError, AiRequestError) as error:
+            can_search = False
+            prompt = build_essay_review_prompt(question, materials, answer_text, can_search=False)
+            prompt += f"\n【检索尝试结果】联网检索失败：{str(error)[:160]}。research_status 必须写明检索失败。\n"
+            _update_job(db_path, job_id, "grading", 60, "联网检索未完成，正在依据题目与材料审阅…")
+            run_state.reserve_model_call("essay_review_offline", "联网失败后离线审阅")
+            response, raw = _call_grading_model(
+                chat_completion_func, settings, prompt,
+                bool(options.get("deep_thinking")), structured=True,
+            )
+    else:
+        response, raw = _call_grading_model(
+            chat_completion_func, settings, prompt,
+            bool(options.get("deep_thinking")), structured=True,
+        )
+    raw_parts = [raw]
+    _update_job(db_path, job_id, "validating", 85, "正在核对作文诊断、来源与原文引用…")
+    try:
+        review = validate_essay_review(json.loads(response), answer_text, can_search=can_search)
+    except (ValueError, TypeError) as error:
+        repair_prompt = (
+            f"以下作文审阅 JSON 未通过校验：{error}。请重新核对我的原文与已访问的网页来源，"
+            "仅修正格式、错误引文或来源，不得编造新网页。保持原任务要求。只输出完整 JSON 对象。\n\n"
+            f"原任务：\n{prompt}\n\n待修复响应：\n{response}"
+        )
+        run_state.reserve_model_call("essay_review_repair", str(error))
+        response, repair_raw = _call_grading_model(
+            chat_completion_func, settings, repair_prompt, False, structured=True,
+        )
+        raw_parts.append(repair_raw)
+        review = validate_essay_review(json.loads(response), answer_text, can_search=can_search)
+    result = {"review_type": "essay_review", "review": review, "answer_snapshot": answer_text,
+              "score_status": "not_scored"}
+    report_text = render_essay_review(review)
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            """INSERT INTO grading_reports
+               (attempt_id, provider, model, report_text, prompt_text, raw_response, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'ok')""",
+            (attempt["id"], settings.get("provider_name") or "", settings.get("model") or "",
+             report_text, prompt, "\n\n--- essay review call ---\n".join(raw_parts)),
+        )
+        report_id = cursor.lastrowid
+        conn.execute(
+            """INSERT INTO grading_report_contexts
+               (report_id, rubric_id, pipeline_version, retrieval_json, result_json,
+                validation_json, rubric_snapshot_json, api_call_count, latency_ms)
+               VALUES (?, NULL, ?, '[]', ?, ?, '{}', ?, ?)""",
+            (report_id, PIPELINE_VERSION, json.dumps(result, ensure_ascii=False),
+             json.dumps({"api_calls": run_state.api_call_audit}, ensure_ascii=False),
+             run_state.api_calls, run_state.latency_ms()),
+        )
+    _update_job(db_path, job_id, "completed", 100, "大作文审阅完成。",
+                report_id=report_id, retryable=0)
+    return report_id
+
+
 def run_grading_job(db_path, job_id, chat_completion_func):
     """Run the ordered grading state machine.
 
@@ -196,6 +295,11 @@ def run_grading_job(db_path, job_id, chat_completion_func):
         # A grading job is evaluated against the answer as it existed when the
         # user started the job, even if autosave changes the attempt meanwhile.
         attempt["answer_text"] = options.get("answer_snapshot", attempt.get("answer_text") or "")
+        if question.get("question_type") == "综合写作":
+            return _run_essay_review_job(
+                db_path, job_id, chat_completion_func, run_state,
+                (job, attempt, question, materials, references, settings, question_feedback, options),
+            )
         ref_hash = reference_set_hash(references)
         source_hash = rubric_source_hash(question, materials, references)
         cached_row = None
@@ -243,11 +347,15 @@ def run_grading_job(db_path, job_id, chat_completion_func):
             rubric_prompt = build_rubric_prompt(question, materials, references, consensus)
             prompts.append(rubric_prompt)
             run_state.reserve_model_call("rubric_generation", "首次建立可缓存评分基准")
+            # 评分基准是结构化抽取且会缓存复用，这里强制关闭深度思考：思考模式下
+            # max_tokens 会把推理+正文一起计，推理常吃掉 1.2万~1.5万 token 导致
+            # 正文 JSON 被截断（finish_reason=length），进而触发修复调用挤掉压缩预算。
+            # 非思考模式（实测修复调用即如此）能完整、稳定输出整套评分基准。
             rubric_response, rubric_raw = _call_grading_model(
                 chat_completion_func,
                 settings,
                 rubric_prompt,
-                deep_thinking,
+                False,
                 structured=True,
             )
             raw_parts.append(rubric_raw)
@@ -260,12 +368,17 @@ def run_grading_job(db_path, job_id, chat_completion_func):
                     references,
                     question_feedback,
                 )
-            except Exception:
+            except Exception as validation_error:
                 if not run_state.can_call():
                     raise
-                repair_prompt = _repair_json_prompt(rubric_prompt, rubric_response, "rubric_json")
+                repair_prompt = (
+                    _repair_rubric_prompt(rubric_prompt, rubric_response, str(validation_error))
+                    if isinstance(validation_error, ValueError)
+                    and not isinstance(validation_error, json.JSONDecodeError)
+                    else _repair_json_prompt(rubric_prompt, rubric_response, "rubric_json")
+                )
                 prompts.append(repair_prompt)
-                run_state.reserve_model_call("rubric_repair", "评分基准返回格式校验失败")
+                run_state.reserve_model_call("rubric_repair", str(validation_error))
                 rubric_response, rubric_raw = _call_grading_model(
                     chat_completion_func,
                     settings,
@@ -362,6 +475,7 @@ def run_grading_job(db_path, job_id, chat_completion_func):
                 evidence,
                 calibration_policy=calibration_policy,
                 reviewed=reviewed,
+                require_structure_review=True,
             )
             return evaluation, candidate_result
 
@@ -419,28 +533,90 @@ def run_grading_job(db_path, job_id, chat_completion_func):
         result["answer_snapshot"] = attempt.get("answer_text") or ""
         report_text = render_grading_report(result, rubric, evidence)
         report_text = normalize_revised_answer_word_count(report_text, effective_word_limit)
+        original_answer = attempt.get("answer_text") or ""
+        if revised_answer_overwrites_original(original_answer, result.get("revised_answer")) and run_state.can_call():
+            _update_job(db_path, job_id, "repairing_answer", 90, "修改稿改写过多，正在贴着原答案局部修订…")
+            local_prompt = build_revised_answer_local_edit_prompt(
+                original_answer,
+                result["revised_answer"],
+                result.get("optimization_suggestions"),
+                effective_word_limit,
+            )
+            run_state.reserve_model_call("revised_answer_local_edit", "修改稿改写原答案过多")
+            try:
+                local_response, local_raw = _call_grading_model(
+                    chat_completion_func, settings, local_prompt, False
+                )
+                raw_parts.append(local_raw)
+                localized_answer = compact_revised_answer_linebreaks(
+                    parse_revised_answer_repair(local_response), effective_word_limit
+                )
+                if localized_answer and not revised_answer_overwrites_original(original_answer, localized_answer):
+                    localized_report = replace_revised_answer_body(
+                        report_text, localized_answer, effective_word_limit
+                    )
+                    localized_status = revised_answer_word_count_status(localized_report, effective_word_limit)
+                    if localized_status["over_limit"] and run_state.can_call():
+                        _update_job(db_path, job_id, "repairing_answer", 93, "原文修订已完成，正在压缩到字数限制内…")
+                        retry_prompt = build_revised_answer_retry_prompt(
+                            prompt, localized_report, effective_word_limit
+                        )
+                        run_state.reserve_model_call(
+                            "revised_answer_local_compression",
+                            f"原文修订超过字数硬上限 {localized_status['over_by']} 字",
+                        )
+                        retry_response, retry_raw = _call_grading_model(
+                            chat_completion_func, settings, retry_prompt, False
+                        )
+                        raw_parts.append(retry_raw)
+                        compressed_answer = compact_revised_answer_linebreaks(
+                            parse_revised_answer_repair(retry_response), effective_word_limit
+                        )
+                        if compressed_answer and not revised_answer_overwrites_original(
+                            original_answer, compressed_answer
+                        ):
+                            compressed_report = replace_revised_answer_body(
+                                report_text, compressed_answer, effective_word_limit
+                            )
+                            if not revised_answer_word_count_status(
+                                compressed_report, effective_word_limit
+                            )["over_limit"]:
+                                localized_answer = compressed_answer
+                                localized_report = compressed_report
+                    # Keep a faithful local revision even if compression fails.
+                    # The report's word-count warning makes the remaining limit
+                    # visible instead of hiding the edits behind a global rewrite.
+                    result["revised_answer"] = localized_answer
+                    report_text = localized_report
+            except Exception:
+                logging.exception("Could not localize the revised answer; keeping the original report draft")
+        # 压缩重试在调用预算内循环：单次压缩常常只减掉一部分（例如超 89 格压到仍超 62 格），
+        # 只试一次会把超限的修改稿原样存进报告。只要还有预算且上一轮确有进展就继续压。
         status = revised_answer_word_count_status(report_text, effective_word_limit)
-        if status["over_limit"] and run_state.can_call():
-            _update_job(db_path, job_id, "repairing_answer", 90, "修改版答案超出硬限制，正在局部压缩…")
+        while status["over_limit"] and run_state.can_call():
+            _update_job(db_path, job_id, "repairing_answer", 93, "修改版答案超出硬限制，正在局部压缩…")
             retry_prompt = build_revised_answer_retry_prompt(prompt, report_text, effective_word_limit)
             run_state.reserve_model_call(
                 "revised_answer_compression",
                 f"修改版答案超过字数硬上限 {status['over_by']} 字",
             )
             repair_response, repair_raw = _call_grading_model(
-                chat_completion_func,
-                settings,
-                retry_prompt,
-                False,
+                chat_completion_func, settings, retry_prompt, False
             )
             raw_parts.append(repair_raw)
-            repaired_answer = parse_revised_answer_repair(repair_response)
-            if repaired_answer:
-                result["revised_answer"] = repaired_answer
-                report_text = render_grading_report(result, rubric, evidence)
-                report_text = replace_revised_answer_body(
-                    report_text, repaired_answer, effective_word_limit
-                )
+            repaired_answer = compact_revised_answer_linebreaks(
+                parse_revised_answer_repair(repair_response), effective_word_limit
+            )
+            if not repaired_answer:
+                break
+            result["revised_answer"] = repaired_answer
+            report_text = replace_revised_answer_body(report_text, repaired_answer, effective_word_limit)
+            next_status = revised_answer_word_count_status(report_text, effective_word_limit)
+            if next_status["over_by"] >= status["over_by"]:
+                # 压缩没有实际进展（模型原样返回或更差），停止以免浪费预算。
+                status = next_status
+                break
+            status = next_status
         status = revised_answer_word_count_status(report_text, effective_word_limit)
         latency_ms = run_state.latency_ms()
         validation = {
@@ -490,6 +666,7 @@ def run_grading_job(db_path, job_id, chat_completion_func):
                     latency_ms,
                 ),
             )
+            ingest_report_normative_expressions(conn, report_id)
         completed_message = (
             f"智能批改完成，修改版答案超出字数限制 {status['over_by']} 字。"
             if status["over_limit"]
@@ -693,6 +870,7 @@ def apply_report_feedback(conn, report_id, point_key, corrected_status, correcte
             report_id,
         ),
     )
+    ingest_report_normative_expressions(conn, report_id, force=True)
     return result
 
 

@@ -21,7 +21,13 @@ from gongkao.agent_eval import (
     run_multiturn_eval_suite,
     write_eval_report,
 )
-from gongkao.agent_graph import AgentRunError, _compact_concise_response, _rerank_evidence_with_llm, run_agent
+from gongkao.agent_graph import (
+    AgentRunError,
+    _compact_concise_response,
+    _ground_structured_output,
+    _rerank_evidence_with_llm,
+    run_agent,
+)
 from gongkao.agent_indexer import AgentIndexWorker
 from gongkao.agent_modules import (
     ensure_agent_context_index,
@@ -300,6 +306,66 @@ class AgentSystemTest(unittest.TestCase):
         self.assertTrue(all(item["problem_type"] == "结构表达" for item in context["skill_gaps"]))
         self.assertTrue(candidates)
         self.assertTrue(candidates[0]["skill_targets"])
+        self.assertGreater(candidates[0]["coach_score"], 0)
+        self.assertTrue(candidates[0]["match_reasons"])
+
+    def test_personalized_candidate_ranking_prefers_matching_weakness(self):
+        with connect(self.db_file) as conn:
+            conn.execute(
+                """
+                INSERT INTO questions (
+                    question_code, exam_type, year, region, question_type,
+                    title, prompt, materials, requirements, zhejiang_relevance
+                ) VALUES ('AGENT-Q2', '浙江省考', 2026, ?, '归纳概括',
+                          '民生服务概括', '请概括材料。', '材料二。', '准确简洁。', 5)
+                """,
+                (REGION_ZHEJIANG,),
+            )
+            rebuild_skill_graph(conn, load_knowledge_items())
+            conn.execute(
+                """
+                INSERT INTO agent_weakness_profile (
+                    module, question_type, problem_type, frequency, severity
+                ) VALUES ('analysis', ?, '结构表达', 5, 0.9)
+                """,
+                (QUESTION_TYPE_ANALYSIS,),
+            )
+            candidates = retrieve_candidates(conn, {}, limit=2)
+        self.assertEqual(candidates[0]["question_type"], QUESTION_TYPE_ANALYSIS)
+        self.assertTrue(any("结构表达" in reason for reason in candidates[0]["match_reasons"]))
+        self.assertGreater(candidates[0]["coach_score"], candidates[1]["coach_score"])
+
+    def test_user_context_tracks_recent_improvement(self):
+        with connect(self.db_file) as conn:
+            question_id = conn.execute("SELECT id FROM questions WHERE question_code = 'AGENT-Q1'").fetchone()["id"]
+            conn.execute(
+                """
+                INSERT INTO agent_weakness_profile (
+                    module, question_type, problem_type, frequency, severity
+                ) VALUES ('analysis', ?, '结构表达', 6, 0.8)
+                """,
+                (QUESTION_TYPE_ANALYSIS,),
+            )
+            reports = [
+                ("2026-08-01 10:00:00", "总分：60/100。结构混乱，层次不清。"),
+                ("2026-08-02 10:00:00", "总分：62/100。结构仍有问题，逻辑层次不足。"),
+                ("2026-08-03 10:00:00", "总分：70/100。要点较完整，表达较准确。"),
+                ("2026-08-04 10:00:00", "总分：74/100。材料提取准确，表达简洁。"),
+            ]
+            for index, (created_at, report_text) in enumerate(reports, start=1):
+                attempt_id = conn.execute(
+                    "INSERT INTO attempts (question_id, answer_text, created_at) VALUES (?, ?, ?)",
+                    (question_id, f"作答{index}", created_at),
+                ).lastrowid
+                conn.execute(
+                    "INSERT INTO grading_reports (attempt_id, report_text, created_at) VALUES (?, ?, ?)",
+                    (attempt_id, report_text, created_at),
+                )
+            context = load_user_context(conn)
+        trend = next(item for item in context["weakness_trends"] if item["problem_type"] == "结构表达")
+        self.assertEqual(trend["direction"], "improving")
+        self.assertEqual(context["performance_trend"]["direction"], "improving")
+        self.assertGreater(context["performance_trend"]["delta"], 0)
 
     def test_api_run_without_auto_approve_does_not_create_plan(self):
         with patch("gongkao.agent_graph._graph_for", return_value=FakeGraph()):
@@ -592,6 +658,37 @@ class AgentSystemTest(unittest.TestCase):
         )
         self.assertEqual([card["evidence_id"] for card in reranked["evidence_cards"][:2]], ["evidence:1", "evidence:2"])
         self.assertEqual(metadata["status"], "ranked_by_score")
+
+    def test_structured_output_grounding_removes_invented_refs_and_questions(self):
+        structured = {
+            "summary": "存在结构问题",
+            "weaknesses": [
+                {
+                    "name": "结构表达",
+                    "severity": "critical",
+                    "evidence_refs": ["report:1", "invented:9", 12, 999],
+                    "reason": "依据历史批改",
+                }
+            ],
+            "next_actions": [{"action": "先列提纲", "target": "综合分析", "timebox": "10分钟"}],
+            "recommended_questions": [
+                {"question_id": 12, "title": "模型乱写的标题", "reason": "匹配短板"},
+                {"question_id": 999, "title": "不存在", "reason": "幻觉"},
+            ],
+        }
+        grounded, audit = _ground_structured_output(
+            structured,
+            {
+                "rag_context": {"grounding_contract": {"allowed_evidence_ids": ["report:1"]}},
+                "candidate_questions": [{"id": 12, "title": "真实题目", "question_code": "Q12"}],
+                "review_context": {},
+            },
+        )
+        self.assertEqual(grounded["weaknesses"][0]["severity"], "medium")
+        self.assertEqual(grounded["weaknesses"][0]["evidence_refs"], ["report:1", 12])
+        self.assertEqual(grounded["recommended_questions"], [{"question_id": 12, "title": "真实题目", "reason": "匹配短板"}])
+        self.assertEqual(audit["removed_evidence_refs"], 2)
+        self.assertEqual(audit["removed_questions"], 1)
 
     def test_multiturn_runner_scores_continuity_without_live_judge(self):
         case = {
@@ -1381,15 +1478,24 @@ class AgentSystemTest(unittest.TestCase):
         self.assertIn("agent-message-stream", server_source)
         self.assertIn("agent-composer", server_source)
         self.assertIn("<details class=\"agent-structured-output\">", server_source)
-        self.assertIn("结构化提取", server_source)
+        self.assertIn("分析摘要", server_source)
         self.assertNotIn("<section class=\"agent-structured-output\">", server_source)
         self.assertNotIn("agent-context-panel", server_source)
+        self.assertIn("agent-insight-rail", server_source)
+        self.assertIn("训练概览", server_source)
+        self.assertIn("常用分析", server_source)
+        self.assertIn("常见失分问题", server_source)
+        self.assertIn("高影响", server_source)
+        self.assertIn("中影响", server_source)
+        self.assertIn("推荐训练题", server_source)
+        self.assertIn("训练统计", server_source)
+        self.assertIn("回答质量", server_source)
         self.assertIn("agent-module-workbench", server_source)
         self.assertIn("agent-module-tabs", server_source)
         self.assertIn('visible_modules = ("overview", "summary", "analysis", "countermeasure", "document", "essay")', server_source)
         self.assertIn("复盘本题", server_source)
         self.assertIn("综合写作", (root / "gongkao" / "agent_modules.py").read_text(encoding="utf-8"))
-        self.assertIn("详细筛选", server_source)
+        self.assertIn("筛选范围", server_source)
         self.assertIn("agent-scope-settings", server_source)
         self.assertIn("agent_summary_for_display", server_source)
         self.assertNotIn("运行全量分析", server_source)
@@ -1400,14 +1506,18 @@ class AgentSystemTest(unittest.TestCase):
         self.assertIn("/agent/evals/clear", server_source)
         self.assertIn("/delete", server_source)
         self.assertIn("ragas_average", server_source)
-        self.assertIn("Context", server_source)
-        self.assertIn("Recall@10", server_source)
-        self.assertIn("查看 Trace", server_source)
+        self.assertIn("引用准确", server_source)
+        self.assertIn("资料查找", server_source)
+        self.assertIn("查看执行详情", server_source)
         self.assertIn("prompt_version", server_source)
-        self.assertIn("scripts/run_agent_eval.py", server_source)
         self.assertIn("/agent/memories", server_source)
-        self.assertIn("长期记忆", server_source)
+        self.assertIn("个人偏好", server_source)
         self.assertIn("delete_memory", server_source)
+        self.assertNotIn("TRAINING COMMAND CENTER", agent_page_source)
+        self.assertNotIn("ABILITY LENS", agent_page_source)
+        self.assertNotIn("WEAKNESS MAP", agent_page_source)
+        self.assertNotIn("SKILL MAP", agent_page_source)
+        self.assertNotIn("RAG 与回答质量记录", agent_page_source)
         self.assertNotIn("/agent/showcase", server_source)
         self.assertNotIn("page_agent_showcase", server_source)
         self.assertIn('href="/statistics"', server_source)
@@ -1419,8 +1529,9 @@ class AgentSystemTest(unittest.TestCase):
         self.assertNotIn("手动 Agent", graph_source + tools_source + prompts_source)
         self.assertNotIn("等待用户确认后继续", graph_source)
         self.assertNotIn("awaiting_confirmation", graph_source)
-        self.assertIn('name="agent_connection_mode"', server_source)
-        self.assertIn("沿用批改 API", server_source)
+        self.assertNotIn('name="agent_connection_mode"', server_source)
+        self.assertNotIn('name="agent_model"', server_source)
+        self.assertIn("训练分析始终沿用上方批改服务", server_source)
         self.assertIn("agent_ai_settings", server_source)
         self.assertIn("agent-thread-delete-button", server_source)
         self.assertIn('aria-label="删除线程">×</button>', server_source)
@@ -1446,10 +1557,15 @@ class AgentSystemTest(unittest.TestCase):
         self.assertNotIn("/agent/plan-items/", server_source)
         self.assertNotIn("训练计划", agent_page_source)
         self.assertNotIn("plan_next_actions", graph_source)
-        self.assertIn("grid-template-columns: 260px minmax(0, 1fr)", css)
+        self.assertIn("grid-template-columns: 240px minmax(0, 1fr)", css)
+        self.assertIn("grid-template-columns: 230px minmax(0, 1fr) 286px", css)
+        self.assertIn("grid-template-columns: 210px minmax(0, 1fr) 254px", css)
         self.assertIn("grid-template-columns: repeat(6, minmax(96px, 1fr))", css)
         self.assertIn(".agent-thread-row", css)
-        self.assertIn("grid-template-rows: auto minmax(0, 1fr)", css)
+        self.assertIn("grid-template-rows: auto minmax(0, 1fr) auto", css)
+        self.assertIn(".agent-mission-grid", css)
+        self.assertIn(".agent-weakness-row", css)
+        self.assertIn(".agent-training-columns", css)
         self.assertIn("overflow-y: auto", css)
         self.assertIn(".agent-context-metrics", css)
         self.assertIn(".agent-module-tab", css)

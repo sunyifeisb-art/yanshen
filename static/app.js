@@ -12,6 +12,8 @@ import {
 } from "./js/core.js";
 import { initializeGrading } from "./js/grading.js";
 import { initializeHome } from "./js/home.js";
+import { initializeIdioms } from "./js/idioms.js";
+import { initializeMistakes } from "./js/mistakes.js";
 import {
   configureNavigation,
   fetchLibraryListUpdate,
@@ -20,9 +22,12 @@ import {
   playPartialViewTransition,
 } from "./js/navigation.js";
 import { initializePractice } from "./js/practice.js";
+import { initializePoliticalQuiz } from "./js/political-quiz.js";
 import {
   initializeFilters,
   initializeGlobalForms,
+  initializeNativeDownloads,
+  initializePageFind,
   initializeShellControls,
   initializeTabsAndPagination,
 } from "./js/shell.js";
@@ -57,15 +62,28 @@ export function mountPage() {
     clearLocalRecordMarker.remove();
   }
 
-  initializeGlobalForms(signal);
-  initializeAgent(signal, navigatePartial);
-  initializeShellControls(signal);
-  initializePractice(signal);
-  initializeAnnotations(signal);
-  initializeFilters(signal, navigatePartial);
-  initializeGrading(signal, navigatePartial);
-  initializeTabsAndPagination(signal, navigatePartial);
-  initializeHome(signal);
+  const runInitializer = (name, initialize) => {
+    try {
+      initialize();
+    } catch (error) {
+      console.error(`[研申] ${name} 初始化失败`, error);
+    }
+  };
+
+  runInitializer("全局表单", () => initializeGlobalForms(signal));
+  runInitializer("智能批改", () => initializeAgent(signal, navigatePartial));
+  runInitializer("页面控件", () => initializeShellControls(signal));
+  runInitializer("作答区", () => initializePractice(signal));
+  runInitializer("文本标注", () => initializeAnnotations(signal));
+  runInitializer("筛选", () => initializeFilters(signal, navigatePartial));
+  runInitializer("批改报告", () => initializeGrading(signal, navigatePartial));
+  runInitializer("材料与分页", () => initializeTabsAndPagination(signal, navigatePartial));
+  runInitializer("文件导出", () => initializeNativeDownloads(signal));
+  runInitializer("页内搜索", () => initializePageFind(signal));
+  runInitializer("首页", () => initializeHome(signal));
+  runInitializer("成语学习", () => initializeIdioms(signal));
+  runInitializer("错题本", () => initializeMistakes(signal));
+  runInitializer("时政测验", () => initializePoliticalQuiz(signal));
 }
 
 configureNavigation(mountPage);

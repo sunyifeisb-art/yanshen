@@ -34,6 +34,8 @@ class PointMatch(TypedDict):
     evidence_spans: NotRequired[list[dict]]
     confidence: NotRequired[float]
     missing_elements: NotRequired[list[str]]
+    omission_reason: NotRequired[str]
+    omission_suggestion: NotRequired[str]
 
 
 class DimensionScore(TypedDict):
@@ -66,12 +68,14 @@ class GradingResult(TypedDict, total=False):
     material_reading: list[str]
     optimization_suggestions: list[str]
     reference_fusion: str
+    structure_review: dict
     overall_summary: str
     revised_answer: str
     score: float
     display_score: float
     display_max_score: float | int
     content_score: float
+    content_score_cap: NotRequired[dict]
     validation_errors: list[str]
     answer_snapshot: str
     score_calibration: dict

@@ -50,15 +50,22 @@ export function answerGridCellsForLine(value) {
 
 export function answerGridMetrics(value) {
   const logicalLines = String(value || "").replace(/\r\n?/g, "\n").split("\n");
+  // Editors may retain several empty paragraphs after the answer. They do not
+  // occupy answer-sheet rows until content is entered there.
+  while (logicalLines.length > 2 && logicalLines.at(-1) === "" && logicalLines.at(-2) === "") {
+    logicalLines.pop();
+  }
   let occupiedCells = 0;
+  let writtenCells = 0;
   let lines = 0;
   let currentLineCells = 0;
   logicalLines.forEach((line, index) => {
-    if (index < logicalLines.length - 1 && line === "") return;
     const contentCells = answerGridCellsForLine(line);
+    writtenCells += contentCells;
     currentLineCells = contentCells ? ((contentCells - 1) % 25) + 1 : 0;
     if (index < logicalLines.length - 1) {
-      const lineCount = Math.ceil(contentCells / 25);
+      // 换行段落未写满的行按整行 25 格计（申论答题纸规矩：换行后本行剩余格不再使用）。
+      const lineCount = Math.max(1, Math.ceil(contentCells / 25));
       occupiedCells += lineCount * 25;
       lines += lineCount;
     } else {
@@ -66,7 +73,7 @@ export function answerGridMetrics(value) {
       lines += Math.ceil(contentCells / 25);
     }
   });
-  return { occupiedCells, lines, currentLineCells };
+  return { occupiedCells, writtenCells, unusedCells: occupiedCells - writtenCells, lines, currentLineCells };
 }
 
 export function answerLimit(value) {

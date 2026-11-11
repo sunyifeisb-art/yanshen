@@ -1227,6 +1227,65 @@ body[data-active-section="papers"] .paper-card {
   background: transparent;
 }
 .grading-compare-panel .grading-context-body { padding: 0; }
+.grading-reference-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.grading-reference-heading h2 { margin: 0; }
+.grading-reference-heading .button {
+  width: auto;
+  min-height: 32px;
+  margin: 0;
+  padding: 5px 11px;
+  white-space: nowrap;
+}
+.grading-material-placeholder { margin: 8px 0 0; }
+.grading-material-drawer {
+  position: fixed;
+  z-index: 120;
+  top: 18px;
+  left: calc(var(--sidebar-width) + 18px);
+  display: flex;
+  flex-direction: column;
+  width: min(600px, 44vw);
+  max-height: calc(100vh - 36px);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 22px 64px rgba(25, 43, 35, .18);
+}
+.grading-material-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.grading-material-drawer-header .eyebrow { margin: 0 0 4px; }
+.grading-material-drawer-header h2 { margin: 0; font-size: 21px; }
+.grading-material-drawer-header .button { flex: 0 0 auto; margin: 0; }
+.grading-material-drawer-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 17px 20px 22px;
+}
+.grading-material-drawer-body .content-tabs-row { flex-wrap: wrap; }
+.grading-material-drawer-body .material-text { line-height: 1.85; }
+.shell.sidebar-top .grading-material-drawer { top: 100px; left: 18px; max-height: calc(100vh - 118px); }
+@media (max-width: 1120px) {
+  .grading-material-drawer,
+  .shell.sidebar-top .grading-material-drawer {
+    top: 12px;
+    left: 12px;
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+}
 .grading-material-panel {
   border: 0;
   border-top: 1px solid var(--line);
@@ -2254,6 +2313,32 @@ body[data-active-section="settings"] .file-picker-row {
   max-height: calc(100vh - 72px);
   overflow: hidden;
 }
+
+/* The coach home is a command center, while conversation pages remain the
+   focused two-column chat above. Keep the home-specific insight rail in its
+   own desktop column instead of letting the legacy chat grid push it down. */
+.agent-workspace.agent-workspace-home {
+  grid-template-columns: 210px minmax(0, 1fr) 254px;
+  gap: 18px;
+}
+.agent-workspace-home .agent-thread-rail {
+  padding-right: 16px;
+}
+.agent-workspace-home .agent-insight-rail {
+  position: static;
+  top: auto;
+  align-self: stretch;
+  max-height: 100%;
+  overflow-y: auto;
+}
+.agent-workspace-home .agent-module-tabs {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(82px, 1fr));
+  gap: 6px;
+}
+.agent-workspace-home .agent-module-tab {
+  min-width: 0;
+}
 .agent-thread-rail {
   height: 100%;
   max-height: 100%;
@@ -2463,8 +2548,27 @@ body[data-active-section="settings"] .file-picker-row {
   .statistics-grid .activity-panel,
   .statistics-grid .regions-panel,
   .statistics-grid .type-progress-panel { grid-column: 1; grid-row: auto; }
-  .agent-workspace,
-  .agent-main { min-height: auto; max-height: none; }
+  .agent-workspace {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+  .agent-workspace.agent-workspace-home {
+    grid-template-columns: 1fr;
+  }
+  .agent-main {
+    height: auto;
+    min-height: auto;
+    max-height: none;
+  }
+  .agent-workspace-home .agent-thread-rail,
+  .agent-workspace-home .agent-insight-rail {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
   .agent-message-stream { overflow: visible; }
   .answer-compose { padding-left: 0; border-left: 0; }
 }

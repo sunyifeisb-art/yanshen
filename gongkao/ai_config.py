@@ -14,17 +14,11 @@ def load_agent_settings(conn):
 
 
 def load_effective_agent_settings(conn):
-    grading = load_grading_settings(conn)
-    agent = load_agent_settings(conn)
-    if not agent or agent.get("use_grading_api", 1):
-        return {**grading, "mode": "api"}
-    return {
-        **grading,
-        "mode": "api",
-        "provider_name": agent.get("provider_name") or "DeepSeek",
-        "api_base_url": agent.get("api_base_url") or "https://api.deepseek.com",
-        "api_key": agent.get("api_key") or "",
-        "api_key_env": agent.get("api_key_env") or "",
-        "model": agent.get("model") or "deepseek-v4-pro",
-        "temperature": agent.get("temperature", 0.2),
-    }
+    # AI 教练始终与批改保持一致：直接沿用批改的服务商/模型/密钥/温度，
+    # 修改批改设置时教练自动跟随。不再支持为教练单独设置连接。
+    # chatgpt（ChatGPT/Codex 账号）模式原样传给教练；仅手动 codex 模式转 api，
+    # 因为手动模式需要人工复制批改包，无法被教练自动调用。
+    effective = {**load_grading_settings(conn)}
+    if effective.get("mode") == "codex":
+        effective["mode"] = "api"
+    return effective

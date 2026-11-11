@@ -1,5 +1,75 @@
 import { clampNumber, showConfirmModal, showUndoToast, viewState } from "./core.js";
 
+async function copyText(text) {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) { /* fall through to legacy path */ }
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.append(textarea);
+    textarea.select();
+    const ok = document.execCommand("copy");
+    textarea.remove();
+    return ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+function showCopyToast(message) {
+  document.querySelector("[data-copy-toast]")?.remove();
+  const toast = document.createElement("div");
+  toast.className = "copy-toast";
+  toast.dataset.copyToast = "1";
+  toast.setAttribute("role", "status");
+  toast.textContent = message;
+  document.body.append(toast);
+  window.setTimeout(() => toast.remove(), 1500);
+}
+
+function floatingToolbarPosition(anchorRect, toolbarRect, readingGap = 12) {
+  const margin = 8;
+  const sideGap = 12;
+  const viewportWidth = document.documentElement.clientWidth;
+  const viewportHeight = document.documentElement.clientHeight;
+  const maxTop = Math.max(margin, viewportHeight - toolbarRect.height - margin);
+  const centeredTop = clampNumber(
+    anchorRect.top + (anchorRect.height / 2) - (toolbarRect.height / 2),
+    margin,
+    maxTop,
+  );
+
+  // Prefer the horizontal gutter. This keeps the toolbar completely off the
+  // reading line instead of merely moving it to another line of material.
+  const rightLeft = anchorRect.right + sideGap;
+  if (rightLeft + toolbarRect.width <= viewportWidth - margin) {
+    return { top: centeredTop, left: rightLeft, placement: "right" };
+  }
+  const leftLeft = anchorRect.left - toolbarRect.width - sideGap;
+  if (leftLeft >= margin) {
+    return { top: centeredTop, left: leftLeft, placement: "left" };
+  }
+
+  const topCandidate = anchorRect.top - toolbarRect.height - readingGap;
+  const bottomCandidate = anchorRect.bottom + readingGap;
+  const top = topCandidate >= margin
+    ? topCandidate
+    : clampNumber(bottomCandidate, margin, maxTop);
+  const left = clampNumber(
+    anchorRect.left + (anchorRect.width / 2) - (toolbarRect.width / 2),
+    margin,
+    Math.max(margin, viewportWidth - toolbarRect.width - margin),
+  );
+  return { top, left, placement: topCandidate >= margin ? "above" : "below" };
+}
+
 export function editableValue(element) {
   if (!element) return "";
   if ("value" in element) return element.value;
@@ -202,6 +272,10 @@ export function materialHighlightKey(container) {
   return `gongkao.materialHighlights:v1:${container.dataset.highlightScope}:material:${container.dataset.materialId}`;
 }
 
+export function legacyMaterialHighlightKey(container) {
+  return `gongkao.materialHighlights:v1:question-${container.dataset.questionId}:material:${container.dataset.materialId}`;
+}
+
 export function textAnnotationKey(container) {
   if (container.hasAttribute("data-material-highlight")) {
     return materialHighlightKey(container);
@@ -245,7 +319,14 @@ export function parseTextAnnotations(raw) {
 export function localTextAnnotations(container) {
   try {
     const raw = viewState.persistentGet(textAnnotationKey(container));
-    return raw === null ? null : parseTextAnnotations(raw);
+    if (raw !== null) return parseTextAnnotations(raw);
+    if (container.hasAttribute("data-material-highlight") && container.dataset.questionId) {
+      // Retain an unsaved mark from the old per-question cache during upgrade.
+      if (serverTextAnnotations(container).length) return null;
+      const legacy = viewState.persistentGet(legacyMaterialHighlightKey(container));
+      if (legacy !== null) return parseTextAnnotations(legacy);
+    }
+    return null;
   } catch (error) {
     return null;
   }
@@ -376,6 +457,9 @@ export function writeTextAnnotations(container, highlights) {
   try {
     if (container.dataset.annotationSaveUrl) {
       viewState.persistentSet(key, serialized);
+      if (container.hasAttribute("data-material-highlight") && container.dataset.questionId) {
+        viewState.persistentRemove(legacyMaterialHighlightKey(container));
+      }
     } else if (!anchored.length) {
       viewState.persistentRemove(key);
     } else {
@@ -706,12 +790,159 @@ export function selectedMaterialRange() {
 
 
 
+export function initializeSelectionMenu(signal) {
+  // 通用"选中文字 → 高亮/复制"浮动菜单。
+  // 作用于任何内容文本（材料、题目、作答要求、参考答案等），
+  // 标注容器（data-material-highlight / data-text-annotation）与输入框由
+  // 标注工具栏/编辑器接管，不重复弹出。
+  document.querySelectorAll(".selection-menu").forEach((el) => el.remove());
+  const menu = document.createElement("div");
+  menu.className = "selection-menu";
+  menu.hidden = true;
+  menu.innerHTML = `
+    <button type="button" class="selection-menu-copy" data-selection-copy aria-label="复制选中文字" title="复制选中文字">复制</button>
+    <span class="selection-menu-divider" aria-hidden="true"></span>
+    <span class="selection-menu-colors" role="group" aria-label="高亮颜色">
+      ${materialHighlightColors.map((color) => (
+        `<button type="button" class="selection-menu-color" data-selection-color="${color}" data-highlight-color="${color}" aria-label="${color}高亮" title="${color}高亮"></button>`
+      )).join("")}
+    </span>
+  `;
+  document.body.append(menu);
+
+  let resetTimer = null;
+  const hide = () => { menu.hidden = true; };
+
+  const isFunctionalSelection = (node) => {
+    if (!node || !node.closest) return false;
+    // 侧边栏 / 导航 / 功能键 / 表单控件：不弹选中菜单
+    if (node.closest("aside, nav, .sidebar")) return true;
+    if (node.closest("button, input, select, textarea, label")) return true;
+    if (node.closest("[role='button'], [role='tab'], [role='menuitem'], [role='navigation']")) return true;
+    // 答题编辑器（contenteditable）由标注工具栏接管
+    if (node.closest("[contenteditable]")) return true;
+    return false;
+  };
+
+  const updateFromSelection = () => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount !== 1) {
+      hide();
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    if (!range.toString().trim()) { hide(); return; }
+    const startNode = range.startContainer.nodeType === Node.TEXT_NODE
+      ? range.startContainer.parentElement
+      : range.startContainer;
+    if (isFunctionalSelection(startNode)) { hide(); return; }
+    // 标注容器（答题页材料等）：只有专用工具栏已经实际显示时才让给它；
+    // WKWebView 某些选择事件不会触发 mouseup，或 offset 计算会短暂失败，
+    // 此时通用菜单继续兜底，避免两个菜单同时都隐藏。
+    if (startNode.closest("[data-material-highlight], [data-text-annotation]")) {
+      const annotationToolbar = document.querySelector("[data-highlight-toolbar]");
+      if (selectedTextAnnotationRange() && annotationToolbar && !annotationToolbar.hidden) {
+        hide();
+        return;
+      }
+    }
+    const rect = range.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) { hide(); return; }
+    menu.hidden = false;
+    const menuRect = menu.getBoundingClientRect();
+    const position = floatingToolbarPosition(rect, menuRect, 18);
+    menu.dataset.placement = position.placement;
+    menu.style.top = `${Math.round(position.top)}px`;
+    menu.style.left = `${Math.round(position.left)}px`;
+  };
+
+  let selectionUpdateTimer = null;
+  const scheduleSelectionUpdate = () => {
+    window.clearTimeout(selectionUpdateTimer);
+    selectionUpdateTimer = window.setTimeout(updateFromSelection, 0);
+  };
+
+  document.addEventListener("selectionchange", scheduleSelectionUpdate, { signal: signal });
+  document.addEventListener("mouseup", scheduleSelectionUpdate, { signal: signal });
+  document.addEventListener("keyup", (event) => {
+    if (event.key === "Shift" || event.key.startsWith("Arrow")) scheduleSelectionUpdate();
+  }, { signal: signal });
+  document.addEventListener("scroll", hide, { passive: true, capture: true, signal: signal });
+  document.addEventListener("mousedown", (event) => {
+    if (menu.contains(event.target)) return;
+    window.setTimeout(hide, 0);
+  }, { signal: signal });
+
+  menu.querySelector("[data-selection-copy]").addEventListener("click", async () => {
+    const text = window.getSelection()?.toString() || "";
+    if (!text) { hide(); return; }
+    const ok = await copyText(text);
+    showCopyToast(ok ? "已复制选中文字" : "复制失败，请手动复制");
+    window.clearTimeout(resetTimer);
+    resetTimer = window.setTimeout(hide, 1200);
+  });
+
+  menu.querySelectorAll("[data-selection-color]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const ok = applySelectionHighlight(button.dataset.selectionColor);
+      hide();
+      showCopyToast(ok ? "已高亮" : "高亮失败，请重新选择文字");
+    });
+  });
+}
+
+function applySelectionHighlight(color) {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
+  const range = selection.getRangeAt(0);
+  if (range.collapsed || !range.toString().trim()) return false;
+  const colors = {
+    yellow: "rgba(245, 196, 78, .38)",
+    orange: "rgba(235, 139, 61, .3)",
+    pink: "rgba(224, 116, 148, .28)",
+    purple: "rgba(145, 105, 190, .27)",
+    blue: "rgba(79, 143, 207, .28)",
+    green: "rgba(86, 171, 133, .28)",
+  };
+  const bg = colors[color] || colors.yellow;
+  const textNodes = [];
+  const root = range.commonAncestorContainer;
+  if (root.nodeType === Node.TEXT_NODE) {
+    textNodes.push(root);
+  } else {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      if (range.intersectsNode(walker.currentNode)) textNodes.push(walker.currentNode);
+    }
+  }
+  if (!textNodes.length) return false;
+  for (const tn of textNodes) {
+    const start = tn === range.startContainer ? range.startOffset : 0;
+    const end = tn === range.endContainer ? range.endOffset : tn.nodeValue.length;
+    if (start >= end || end > tn.nodeValue.length) continue;
+    const mark = document.createElement("mark");
+    mark.style.backgroundColor = bg;
+    mark.style.borderRadius = "3px";
+    mark.style.boxDecorationBreak = "clone";
+    mark.style.webkitBoxDecorationBreak = "clone";
+    const frag = document.createDocumentFragment();
+    if (start > 0) frag.appendChild(document.createTextNode(tn.nodeValue.slice(0, start)));
+    mark.appendChild(document.createTextNode(tn.nodeValue.slice(start, end)));
+    frag.appendChild(mark);
+    if (end < tn.nodeValue.length) frag.appendChild(document.createTextNode(tn.nodeValue.slice(end)));
+    tn.parentNode.replaceChild(frag, tn);
+  }
+  selection.removeAllRanges();
+  return true;
+}
+
 export function initializeAnnotations(signal) {
   const annotationContainers = Array.from(new Set([
     ...document.querySelectorAll("[data-material-highlight]"),
     ...document.querySelectorAll("[data-text-annotation]"),
   ]));
   if (annotationContainers.length) {
+    document.querySelectorAll("[data-highlight-toolbar]").forEach((btn) => btn.remove());
     const toolbar = document.createElement("div");
     toolbar.className = "material-highlight-toolbar";
     toolbar.hidden = true;
@@ -732,6 +963,12 @@ export function initializeAnnotations(signal) {
         </button>
         <button type="button" class="highlight-style strike" data-highlight-style="strike" aria-label="划掉" title="划掉"><span>划</span></button>
         <button type="button" class="highlight-clear" data-highlight-clear aria-label="清除标注" title="清除标注"><span aria-hidden="true">×</span></button>
+        <button type="button" class="highlight-copy" data-highlight-copy aria-label="复制选中文字" title="复制选中文字">
+          <svg class="annotation-copy-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="9" y="9" width="11" height="11" rx="2"></rect>
+            <path d="M5 15V5a2 2 0 0 1 2-2h10"></path>
+          </svg>
+        </button>
       </div>
     `;
     document.body.append(toolbar);
@@ -889,11 +1126,12 @@ export function initializeAnnotations(signal) {
       const popoverWidth = popover.offsetWidth || 200;
       const popoverHeight = popover.offsetHeight || 80;
 
-      const x = rect.left + window.scrollX + (rect.width - popoverWidth) / 2;
-      let y = rect.top + window.scrollY - popoverHeight - 8;
+      // 与标注工具栏一致：position:fixed + 纯视口坐标定位
+      const x = rect.left + (rect.width - popoverWidth) / 2;
+      let y = rect.top - popoverHeight - 8;
 
-      if (y < window.scrollY + 8) {
-        y = rect.bottom + window.scrollY + 8;
+      if (y < 8) {
+        y = rect.bottom + 8;
       }
 
       popover.style.left = `${Math.round(Math.max(8, x))}px`;
@@ -931,17 +1169,18 @@ export function initializeAnnotations(signal) {
       syncToolbarSelection(mark);
       toolbar.hidden = false;
       const toolbarRect = toolbar.getBoundingClientRect();
-      const topCandidate = range.rect.top + window.scrollY - toolbarRect.height - 8;
-      const top = topCandidate > window.scrollY + 8
-        ? topCandidate
-        : range.rect.bottom + window.scrollY + 8;
-      const left = clampNumber(
-        range.rect.left + window.scrollX + (range.rect.width / 2) - (toolbarRect.width / 2),
-        window.scrollX + 8,
-        window.scrollX + document.documentElement.clientWidth - toolbarRect.width - 8,
-      );
-      toolbar.style.top = `${Math.round(top)}px`;
-      toolbar.style.left = `${Math.round(left)}px`;
+      const computedLineHeight = Number.parseFloat(window.getComputedStyle(range.container).lineHeight);
+      const lineHeight = Number.isFinite(computedLineHeight) && computedLineHeight > 0
+        ? computedLineHeight
+        : Math.max(18, Number(range.rect.height) || 18);
+      // Leave one text line between the floating toolbar and the selection.
+      // With only an 8px gap the toolbar can cover the neighbouring line in
+      // dense material text, which also makes pointer entry feel unstable.
+      const readingGap = Math.min(44, Math.max(18, Math.ceil(lineHeight) + 6));
+      const position = floatingToolbarPosition(range.rect, toolbarRect, readingGap);
+      toolbar.dataset.placement = position.placement;
+      toolbar.style.top = `${Math.round(position.top)}px`;
+      toolbar.style.left = `${Math.round(position.left)}px`;
     };
     const showToolbarForHighlight = (mark) => {
       const container = mark.closest("[data-material-highlight], [data-text-annotation]");
@@ -982,6 +1221,15 @@ export function initializeAnnotations(signal) {
       range.note = note;
 
       showToolbar(range);
+    };
+    let toolbarSelectionUpdateTimer = null;
+    const scheduleToolbarSelectionUpdate = () => {
+      window.clearTimeout(toolbarSelectionUpdateTimer);
+      toolbarSelectionUpdateTimer = window.setTimeout(() => {
+        if (isModalActive()) return;
+        if (activeRangeFromHighlight) return;
+        updateToolbarFromSelection();
+      }, 0);
     };
     const applyActiveAnnotation = (patch) => {
       if (!activeRange) return;
@@ -1122,22 +1370,20 @@ export function initializeAnnotations(signal) {
         });
       });
     });
-    document.addEventListener("mouseup", () => {
-      window.setTimeout(() => {
-        if (isModalActive()) return;
-        if (activeRangeFromHighlight) return;
-        updateToolbarFromSelection();
-      }, 0);
-    }, { signal: signal });
+    document.addEventListener("selectionchange", scheduleToolbarSelectionUpdate, { signal: signal });
+    document.addEventListener("mouseup", scheduleToolbarSelectionUpdate, { signal: signal });
     document.addEventListener("keyup", (event) => {
       if (!event.key) return;
       if (event.key.startsWith("Arrow") || event.key === "Shift") {
-        window.setTimeout(updateToolbarFromSelection, 0);
+        scheduleToolbarSelectionUpdate();
       }
     }, { signal: signal });
     document.addEventListener("mousedown", (event) => {
       if (isModalActive()) return;
-      if (!toolbar.hidden && !toolbar.contains(event.target)) {
+      const materialFontControls = event.target instanceof Element
+        ? event.target.closest("[data-material-font-controls]")
+        : null;
+      if (!toolbar.hidden && !toolbar.contains(event.target) && !materialFontControls) {
         hideToolbar();
       }
       const popover = document.getElementById("annotation-popover-card");
@@ -1257,6 +1503,15 @@ export function initializeAnnotations(signal) {
       });
     });
     toolbar.querySelector("[data-highlight-clear]")?.addEventListener("click", () => applyActiveAnnotation(null));
+    toolbar.querySelector("[data-highlight-copy]")?.addEventListener("click", async () => {
+      if (!activeRange) return;
+      const text = editableValue(activeRange.container).slice(activeRange.start, activeRange.end);
+      if (!text) return;
+      const ok = await copyText(text);
+      showCopyToast(ok ? "已复制选中文字" : "复制失败，请手动复制");
+    });
     window.addEventListener("scroll", hideToolbar, { passive: true, signal: signal });
   }
+
+  initializeSelectionMenu(signal);
 }
